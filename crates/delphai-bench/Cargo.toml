@@ -1,0 +1,15 @@
+[package]
+name = "delphai-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+delphai-core = { path = "../delphai-core" }
+criterion = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+
+[[bench]]
+name = "llm_throughput"
+harness = false
