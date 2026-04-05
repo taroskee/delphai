@@ -13,8 +13,17 @@ pub enum Emotion {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Relationship {
     pub target_name: String,
-    /// -100 (hostile) to +100 (devoted).
-    pub affinity: i8,
+    /// 0.0 (stranger) to 1.0 (intimate). How well they know each other.
+    pub familiarity: f32,
+    /// 0.0 (distrust) to 1.0 (complete trust).
+    pub trust: f32,
+}
+
+impl Relationship {
+    pub fn clamp(&mut self) {
+        self.familiarity = self.familiarity.clamp(0.0, 1.0);
+        self.trust = self.trust.clamp(0.0, 1.0);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,7 +61,8 @@ mod tests {
             emotion: Emotion::Happy,
             relationships: vec![Relationship {
                 target_name: "Elder".into(),
-                affinity: 30,
+                familiarity: 0.6,
+                trust: 0.8,
             }],
             divine_awareness: 0.15,
         };
@@ -60,19 +70,34 @@ mod tests {
         let restored: Citizen = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.name, "Kael");
         assert_eq!(restored.emotion, Emotion::Happy);
-        assert_eq!(restored.relationships[0].affinity, 30);
+        assert!((restored.relationships[0].familiarity - 0.6).abs() < f32::EPSILON);
+        assert!((restored.relationships[0].trust - 0.8).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn relationship_affinity_boundary() {
-        let lo = Relationship { target_name: "enemy".into(), affinity: -100 };
-        let hi = Relationship { target_name: "friend".into(), affinity: 100 };
-        let lo_json = serde_json::to_string(&lo).unwrap();
-        let hi_json = serde_json::to_string(&hi).unwrap();
-        let lo_back: Relationship = serde_json::from_str(&lo_json).unwrap();
-        let hi_back: Relationship = serde_json::from_str(&hi_json).unwrap();
-        assert_eq!(lo_back.affinity, -100);
-        assert_eq!(hi_back.affinity, 100);
+    fn relationship_clamp() {
+        let mut rel = Relationship {
+            target_name: "test".into(),
+            familiarity: 1.5,
+            trust: -0.3,
+        };
+        rel.clamp();
+        assert_eq!(rel.familiarity, 1.0);
+        assert_eq!(rel.trust, 0.0);
+    }
+
+    #[test]
+    fn relationship_serde_roundtrip() {
+        let rel = Relationship {
+            target_name: "Elder".into(),
+            familiarity: 0.7,
+            trust: 0.3,
+        };
+        let json = serde_json::to_string(&rel).unwrap();
+        let restored: Relationship = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.target_name, "Elder");
+        assert!((restored.familiarity - 0.7).abs() < f32::EPSILON);
+        assert!((restored.trust - 0.3).abs() < f32::EPSILON);
     }
 
     #[test]
