@@ -1,5 +1,5 @@
-pub mod player2;
 pub mod provider;
+pub mod player2;
 
-pub use player2::Player2Provider;
 pub use provider::{CitizenResponse, LlmError, LlmProvider};
+pub use player2::Player2Provider;

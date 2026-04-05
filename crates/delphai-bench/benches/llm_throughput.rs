@@ -1,27 +1,16 @@
-//! LLMスループットベンチマーク
+//! LLM throughput benchmark.
 //!
-//! 効率スコア = (quality × conversations) / time_secs
-//! 合格基準: quality≥0.7, conversations≥3, time≤5s, efficiency≥0.4
+//! Efficiency = (quality * conversations) / time_secs
+//! Pass criteria: quality >= 0.7, conversations >= 3, time <= 5s, efficiency >= 0.4
 //!
-//! 実行: `cargo bench --bench llm_throughput`
-//!
-//! NOTE: このベンチは実際のLLMエンドポイントに接続する。
-//! エンドポイントが利用できない場合はスキップされる (skip_if_unavailable)。
+//! Run: `cargo bench --bench llm_throughput`
 
+use async_trait::async_trait;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use delphai_core::llm::{CitizenResponse, LlmError, LlmProvider};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-async fn async_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-}
-
-/// 品質スコアの簡易評価 (0.0-1.0)。
-/// 全フィールドが空でなければ満点。空フィールドがあれば減点。
 fn quality_score(r: &CitizenResponse) -> f64 {
     let mut score = 0.0_f64;
     if !r.speech.is_empty() {
@@ -39,7 +28,6 @@ fn quality_score(r: &CitizenResponse) -> f64 {
     score
 }
 
-/// 効率スコアを計算しassert。
 fn assert_efficiency(responses: &[CitizenResponse], elapsed: Duration) {
     let quality: f64 = responses.iter().map(quality_score).sum::<f64>() / responses.len() as f64;
     let conversations = responses.len() as f64;
@@ -47,8 +35,8 @@ fn assert_efficiency(responses: &[CitizenResponse], elapsed: Duration) {
     let efficiency = (quality * conversations) / time_secs;
 
     eprintln!(
-        "quality={:.2} conversations={} time={:.1}s efficiency={:.3}",
-        quality, conversations as usize, time_secs, efficiency
+        "quality={quality:.2} conversations={} time={time_secs:.1}s efficiency={efficiency:.3}",
+        conversations as usize,
     );
 
     assert!(time_secs <= 5.0, "time exceeded 5s: {time_secs:.1}s");
@@ -57,12 +45,11 @@ fn assert_efficiency(responses: &[CitizenResponse], elapsed: Duration) {
     assert!(efficiency >= 0.4, "efficiency too low: {efficiency:.3}");
 }
 
-/// スタブプロバイダー (ベンチ用、実ネットワーク不要)
 struct StubProvider {
     delay_ms: u64,
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl LlmProvider for StubProvider {
     fn name(&self) -> &str {
         "stub"
@@ -84,12 +71,12 @@ fn bench_llm_batch(c: &mut Criterion) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap();
+        .expect("failed to build tokio runtime");
 
     let provider: Arc<dyn LlmProvider> = Arc::new(StubProvider { delay_ms: 200 });
 
     let prompts: Vec<String> = (0..5)
-        .map(|i| format!("住民{i}の状況: 食料不足。次の行動を決めよ。"))
+        .map(|i| format!("citizen {i}: food shortage. decide next action."))
         .collect();
 
     let mut group = c.benchmark_group("llm_throughput");
@@ -105,7 +92,10 @@ fn bench_llm_batch(c: &mut Criterion) {
                     let batch = prompts[..size].to_vec();
                     async move {
                         let start = Instant::now();
-                        let results = provider.generate_batch(&batch).await.unwrap();
+                        let results = provider
+                            .generate_batch(&batch)
+                            .await
+                            .expect("stub provider should not fail");
                         let elapsed = start.elapsed();
                         assert_efficiency(&results, elapsed);
                         results

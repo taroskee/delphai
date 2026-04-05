@@ -1,1 +1,1 @@
-// Benchmark crate: no library code, only benches.
+// Benchmark-only crate.

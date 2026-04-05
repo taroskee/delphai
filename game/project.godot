@@ -1,20 +1,14 @@
 ; Engine configuration file.
 ; It's best edited using the editor UI and not directly,
-; but modifying it to be used as a template is fine.
-;
-; Format:
-;   [section] ; section goes between []
-;   param=value ; assign values to parameters
+; but it can also be edited via code if needed.
 
 config_version=5
 
 [application]
 
-config/name="DelphAI"
-config/description="LLM-driven civilization simulation"
+config/name="delphai"
 run/main_scene="res://scenes/main.tscn"
-config/features=PackedStringArray("4.4", "Forward Plus")
-config/icon="res://icon.svg"
+config/features=PackedStringArray("4.4")
 
 [rendering]
 

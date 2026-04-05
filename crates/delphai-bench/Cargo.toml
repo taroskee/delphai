@@ -6,9 +6,9 @@ license.workspace = true
 
 [dev-dependencies]
 delphai-core = { path = "../delphai-core" }
-criterion = { workspace = true }
-tokio = { workspace = true }
-serde_json = { workspace = true }
+criterion.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
 
 [[bench]]
 name = "llm_throughput"

@@ -1,0 +1,12 @@
+[package]
+name = "delphai-gdext"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+delphai-core = { path = "../delphai-core" }
+godot.workspace = true

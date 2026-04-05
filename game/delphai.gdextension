@@ -1,11 +1,14 @@
 [configuration]
+
 entry_symbol = "gdext_rust_init"
 compatibility_minimum = 4.4
+reloadable = true
 
 [libraries]
-linux.debug.x86_64 = "res://../target/debug/libdelphai_core.so"
-linux.release.x86_64 = "res://../target/release/libdelphai_core.so"
-macos.debug = "res://../target/debug/libdelphai_core.dylib"
-macos.release = "res://../target/release/libdelphai_core.dylib"
-windows.debug.x86_64 = "res://../target/debug/delphai_core.dll"
-windows.release.x86_64 = "res://../target/release/delphai_core.dll"
+
+linux.debug.x86_64 = "res://../target/debug/libdelphai_gdext.so"
+linux.release.x86_64 = "res://../target/release/libdelphai_gdext.so"
+macos.debug = "res://../target/debug/libdelphai_gdext.dylib"
+macos.release = "res://../target/release/libdelphai_gdext.dylib"
+windows.debug.x86_64 = "res://../target/debug/delphai_gdext.dll"
+windows.release.x86_64 = "res://../target/release/delphai_gdext.dll"

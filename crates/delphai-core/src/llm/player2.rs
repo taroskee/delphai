@@ -33,21 +33,17 @@ impl Player2Provider {
         self
     }
 
-    fn parse_citizen_response(text: &str) -> Result<CitizenResponse, LlmError> {
-        // JSON配列の場合は最初の要素を取る (バッチレスポンス対応)
+    pub fn parse_citizen_response(text: &str) -> Result<CitizenResponse, LlmError> {
         let value: Value = serde_json::from_str(text)?;
-        let obj = if value.is_array() {
-            value
-                .as_array()
-                .and_then(|a| a.first())
-                .cloned()
-                .unwrap_or(Value::Null)
-        } else {
-            value
+        let obj = match &value {
+            Value::Array(arr) => arr
+                .first()
+                .ok_or_else(|| LlmError::Provider("empty response array".into()))?
+                .clone(),
+            _ => value,
         };
-        let response: CitizenResponse = serde_json::from_value(obj)
-            .map_err(|e| LlmError::Provider(format!("invalid citizen JSON: {e}")))?;
-        Ok(response)
+        serde_json::from_value(obj)
+            .map_err(|e| LlmError::Provider(format!("invalid citizen JSON: {e}")))
     }
 }
 
@@ -139,7 +135,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_single_json() {
+    fn parse_single_json_object() {
         let json = r#"{
             "speech": "おはよう",
             "inner_thought": "眠い",
@@ -154,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_array_json_takes_first() {
+    fn parse_array_takes_first_element() {
         let json = r#"[
             {"speech":"A","inner_thought":"a","action":"idle","emotion_change":"happy","tech_hint":null},
             {"speech":"B","inner_thought":"b","action":"talk","emotion_change":"sad","tech_hint":null}
@@ -164,8 +160,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_invalid_json_returns_error() {
+    fn parse_empty_array_is_error() {
+        let result = Player2Provider::parse_citizen_response("[]");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("empty"), "expected 'empty' in error: {err}");
+    }
+
+    #[test]
+    fn parse_invalid_json_is_error() {
         let result = Player2Provider::parse_citizen_response("not json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_valid_json_but_wrong_schema_is_error() {
+        let result = Player2Provider::parse_citizen_response(r#"{"foo": "bar"}"#);
         assert!(result.is_err());
     }
 }

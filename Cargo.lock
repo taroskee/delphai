@@ -249,9 +249,9 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 name = "delphai-bench"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "criterion",
  "delphai-core",
- "serde_json",
  "tokio",
 ]
 
@@ -260,12 +260,19 @@ name = "delphai-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "godot",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "delphai-gdext"
+version = "0.1.0"
+dependencies = [
+ "delphai-core",
+ "godot",
 ]
 
 [[package]]

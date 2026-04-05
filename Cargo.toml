@@ -1,5 +1,6 @@
 [workspace]
-members = ["crates/delphai-core", "crates/delphai-bench"]
+members = ["crates/delphai-core", "crates/delphai-bench", "crates/delphai-gdext"]
+default-members = ["crates/delphai-core", "crates/delphai-bench"]
 resolver = "2"
 
 [workspace.package]
@@ -15,4 +16,4 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 thiserror = "2"
 criterion = { version = "0.5", features = ["async_tokio"] }
-godot = { version = "0.2", features = [] }
+godot = "0.2"

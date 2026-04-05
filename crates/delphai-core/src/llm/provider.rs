@@ -12,8 +12,8 @@ pub enum LlmError {
     Provider(String),
 }
 
-/// LLM出力のJSONスキーマ。住民1人分。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// LLM output JSON schema for a single citizen.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CitizenResponse {
     pub speech: String,
     pub inner_thought: String,
@@ -26,16 +26,53 @@ pub struct CitizenResponse {
 pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &str;
 
-    /// 単一プロンプトを送信し、住民レスポンスを返す。
     async fn generate(&self, prompt: &str) -> Result<CitizenResponse, LlmError>;
 
-    /// バッチプロンプトを送信し、複数住民のレスポンスを返す。
-    /// デフォルト実装は逐次実行。プロバイダーが対応する場合はオーバーライドする。
+    /// Batch generation. Default: sequential. Providers may override.
     async fn generate_batch(&self, prompts: &[String]) -> Result<Vec<CitizenResponse>, LlmError> {
         let mut results = Vec::with_capacity(prompts.len());
         for prompt in prompts {
             results.push(self.generate(prompt).await?);
         }
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn citizen_response_roundtrip_serde() {
+        let original = CitizenResponse {
+            speech: "hello".into(),
+            inner_thought: "thinking".into(),
+            action: "idle".into(),
+            emotion_change: "neutral".into(),
+            tech_hint: None,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: CitizenResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn citizen_response_with_tech_hint() {
+        let json = r#"{
+            "speech": "fire!",
+            "inner_thought": "hot",
+            "action": "discover",
+            "emotion_change": "excited",
+            "tech_hint": "fire_making"
+        }"#;
+        let r: CitizenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(r.tech_hint, Some("fire_making".into()));
+    }
+
+    #[test]
+    fn citizen_response_missing_field_is_error() {
+        let json = r#"{"speech": "hello"}"#;
+        let result = serde_json::from_str::<CitizenResponse>(json);
+        assert!(result.is_err());
     }
 }
