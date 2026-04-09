@@ -57,7 +57,19 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> String {
     let mut parts = Vec::new();
 
     parts.push(format!(
-        "You are simulating a primitive civilization. Era: {}. Setting: {}.\nAll speech must be written in Japanese.",
+        "You are simulating a primitive civilization. Era: {}. Setting: {}.\n\
+All speech MUST be written in Japanese.\n\
+SPEECH RULES (strictly enforce):\n\
+- 1 to 2 short sentences only. Never more.\n\
+- Plain everyday language. NO poetic expressions, NO metaphors, NO philosophical quotes.\n\
+- Talk about concrete things: hunting, food, weather, people, today's events.\n\
+- React naturally to what the other person just said.\n\
+GOOD example exchange:\n\
+  Kael: 「今日は何してた？」\n\
+  Elder: 「後継者に指導してた。将来が楽しみだ。お前は？」\n\
+  Kael: 「鹿を追ったら逃げられた。でも果物の森を見つけた」\n\
+  Elder: 「それはよかった」\n\
+BAD (never do this): 「炎のゆらめきは宇宙の摂理を映している...」",
         input.world.era, input.world.setting
     ));
 
@@ -104,11 +116,9 @@ pub fn build_divine_voice_prompt(input: &DivineVoicePromptInput) -> String {
         input.citizen.divine_awareness * 100.0,
     ));
 
-    let filtered = filter_divine_voice(input.message, input.citizen.divine_awareness);
-    if let Some(text) = filtered {
+    // filter_divine_voice always returns Some — content degrades with lower awareness
+    if let Some(text) = filter_divine_voice(input.message, input.citizen.divine_awareness) {
         parts.push(format!("\n[Divine Voice]: {text}"));
-    } else {
-        parts.push("\n[Divine Voice]: (nothing reaches this citizen)".into());
     }
 
     parts.push(format!(
@@ -120,17 +130,17 @@ pub fn build_divine_voice_prompt(input: &DivineVoicePromptInput) -> String {
 }
 
 /// Filter divine voice based on citizen's awareness level.
-/// Returns None if awareness is too low for anything to get through.
 ///
-/// Tiers (from todo.md):
-///   0%:      nothing
-///   1-30%:   noise (garbled fragments)
-///   31-60%:  fragments (partial words)
-///   61-90%:  oracle (mostly clear)
-///   91-100%: verbatim
+/// Tiers:
+///   0%:       sensed — something felt, no content discernible
+///   1-30%:    noise (garbled)
+///   31-60%:   fragments (partial words)
+///   61-90%:   oracle (mostly clear)
+///   91-100%:  verbatim
 pub fn filter_divine_voice(message: &str, awareness: f32) -> Option<String> {
     if awareness <= 0.0 {
-        return None;
+        // Citizen feels something inexplicable but cannot hear any words
+        return Some("(sensed — something inexplicable, no words discernible)".to_string());
     }
     if awareness >= 0.91 {
         return Some(message.to_string());
@@ -139,7 +149,6 @@ pub fn filter_divine_voice(message: &str, awareness: f32) -> Option<String> {
         return Some(format!("(oracle) {message}"));
     }
     if awareness >= 0.31 {
-        // Show fragments: keep only some characters
         let fragment: String = message
             .chars()
             .enumerate()
@@ -247,8 +256,10 @@ mod tests {
     // --- filter_divine_voice ---
 
     #[test]
-    fn divine_voice_zero_awareness_returns_none() {
-        assert!(filter_divine_voice("hello", 0.0).is_none());
+    fn divine_voice_zero_awareness_returns_sensed_placeholder() {
+        let result = filter_divine_voice("hello", 0.0).unwrap();
+        assert!(result.contains("sensed"), "expected sensed placeholder: {result}");
+        assert!(!result.contains("hello"), "content must not leak at 0 awareness: {result}");
     }
 
     #[test]
@@ -364,7 +375,8 @@ mod tests {
     }
 
     #[test]
-    fn conversation_prompt_excludes_divine_voice_when_unaware() {
+    fn conversation_prompt_excludes_voice_content_when_unaware() {
+        // awareness=0: citizen senses something but the actual message text must NOT appear
         let world = test_world();
         let a = make_citizen("A", &[], Emotion::Neutral, 0.0);
         let b = make_citizen("B", &[], Emotion::Neutral, 0.0);
@@ -375,8 +387,8 @@ mod tests {
             divine_voice: Some("build a fire"),
         };
         let prompt = build_conversation_prompt(&input);
-        assert!(!prompt.contains("build a fire"));
-        assert!(!prompt.contains("Divine Voice"));
+        assert!(!prompt.contains("build a fire"), "raw content must not leak: {prompt}");
+        assert!(prompt.contains("sensed"), "should still inject sensed placeholder: {prompt}");
     }
 
     #[test]
@@ -476,12 +488,19 @@ mod tests {
             divine_voice: Some("build a fire"),
         };
         let prompt = build_batch_conversation_prompt(&input);
+        // Aware initiator gets full message
         assert!(prompt.contains("Divine Voice for Aware"));
-        assert!(!prompt.contains("Divine Voice for Unaware"));
+        assert!(prompt.contains("build a fire"));
+        // Unaware initiator gets the sensed placeholder but NOT the raw message
+        assert!(prompt.contains("Divine Voice for Unaware"));
+        assert!(prompt.contains("sensed"), "unaware should still see sensed placeholder");
+        // Count occurrences: "build a fire" should appear only once (for Aware)
+        assert_eq!(prompt.matches("build a fire").count(), 1, "raw text must not reach Unaware");
     }
 
     #[test]
-    fn divine_prompt_unaware_citizen_sees_nothing() {
+    fn divine_prompt_unaware_citizen_sees_sensed_placeholder() {
+        // awareness=0: raw message must not appear, but citizen senses something
         let world = test_world();
         let c = make_citizen("A", &[], Emotion::Neutral, 0.0);
         let input = DivineVoicePromptInput {
@@ -490,7 +509,7 @@ mod tests {
             message: "secret message",
         };
         let prompt = build_divine_voice_prompt(&input);
-        assert!(!prompt.contains("secret message"));
-        assert!(prompt.contains("nothing reaches"));
+        assert!(!prompt.contains("secret message"), "raw text must not leak");
+        assert!(prompt.contains("sensed"), "sensed placeholder must appear");
     }
 }

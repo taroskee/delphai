@@ -131,6 +131,25 @@ impl WorldNode {
         GString::from(prompt.unwrap_or_default())
     }
 
+    /// Get a citizen's current divine awareness (0.0–1.0).
+    #[func]
+    fn get_divine_awareness(&self, citizen_idx: i64) -> f64 {
+        self.world
+            .as_ref()
+            .and_then(|w| w.citizens.get(citizen_idx as usize))
+            .map(|c| c.divine_awareness as f64)
+            .unwrap_or(0.0)
+    }
+
+    /// Increase a citizen's divine awareness by `delta` (clamped to [0, 1]).
+    /// Call this each time the player's voice reaches the world.
+    #[func]
+    fn grow_divine_awareness(&mut self, citizen_idx: i64, delta: f64) {
+        let Some(world) = &mut self.world else { return };
+        let Some(citizen) = world.citizens.get_mut(citizen_idx as usize) else { return };
+        citizen.divine_awareness = (citizen.divine_awareness + delta as f32).clamp(0.0, 1.0);
+    }
+
     /// Record that `listener_idx` heard `speaker_name` say `speech`.
     /// Appended to memory_summary so the next prompt includes it as context.
     #[func]
@@ -250,10 +269,12 @@ mod tests {
     }
 
     #[test]
-    fn prompt_excludes_divine_voice_for_unaware_initiator() {
+    fn prompt_excludes_voice_content_for_unaware_initiator() {
+        // awareness=0: sensed placeholder injected but raw text must not appear
         let world = two_citizen_world(); // divine_awareness = 0.0
         let prompt = build_prompt_for_pair(Some(&world), 0, 1, Some("gather wood")).unwrap();
-        assert!(!prompt.contains("gather wood"), "divine voice should be filtered for unaware citizen");
+        assert!(!prompt.contains("gather wood"), "raw text must not reach unaware citizen");
+        assert!(prompt.contains("sensed"), "sensed placeholder should appear");
     }
 
     #[test]

@@ -258,6 +258,13 @@ func _on_voice_pressed() -> void:
 	_voice_input.clear()
 	if _world_sim:
 		_world_sim.set_divine_voice(text)
+		# Grow awareness for all citizens each time the divine voice is sent
+		var count: int = _world_sim.get_citizen_count()
+		for i in range(count):
+			_world_sim.grow_divine_awareness(i, 0.07)
+			var name: String = _world_sim.get_citizen_name(i)
+			var awareness_pct: int = roundi(_world_sim.get_divine_awareness(i) * 100)
+			_log_message("[awareness] %s: %d%%" % [name, awareness_pct])
 		# Queue a divine voice reaction from citizen[0] (Kael, the most aware)
 		_llm_queue.append({"initiator_idx": 0, "partner_idx": 1})
 		_process_llm_queue()
@@ -314,7 +321,13 @@ func _open_log_file() -> void:
 		t["year"], t["month"], t["day"], t["hour"], t["minute"], t["second"]
 	]
 	_log_file = FileAccess.open(fname, FileAccess.WRITE)
-	if not _log_file:
+	if _log_file:
+		# Show the real OS path so the user can find the log file
+		var real_path := ProjectSettings.globalize_path(fname)
+		print("[LOG] 会話ログ: ", real_path)
+		_log_file.store_line("# ログパス: " + real_path)
+		_log_file.flush()
+	else:
 		push_warning("会話ログファイルを開けませんでした: " + fname)
 
 func _log_message(msg: String) -> void:
