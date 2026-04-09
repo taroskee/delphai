@@ -36,5 +36,6 @@ cat > ~/.claude/settings.json << 'EOF'
 }
 EOF
 
+echo ""
 echo "✅ Setup complete!"
 echo "   コンテナ内で 'claude' を実行して認証してください。"

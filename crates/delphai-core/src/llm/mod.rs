@@ -14,4 +14,4 @@ pub use prompt::{
 };
 pub use provider::{CitizenResponse, LlmError, LlmProvider};
 pub use queue::{InferencePriority, InferenceQueue, InferenceRequest};
-pub use response_parser::{parse_batch_response, parse_response};
+pub use response_parser::{parse_batch_response, parse_response, JsonResponseParser, ResponseParser};

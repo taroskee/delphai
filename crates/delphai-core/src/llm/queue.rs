@@ -1,6 +1,8 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+use crate::agent::Citizen;
+
 /// Priority levels for inference requests. Higher = processed first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum InferencePriority {
@@ -13,12 +15,17 @@ pub enum InferencePriority {
 }
 
 /// A request queued for LLM inference.
+///
+/// Stores raw citizen data (not a pre-built prompt) so the dispatcher can
+/// group multiple requests into a single packed batch prompt before calling
+/// the LLM. `partner` is `None` for divine-voice-only reactions.
 #[derive(Debug, Clone)]
 pub struct InferenceRequest {
     pub priority: InferencePriority,
-    pub prompt: String,
-    /// Opaque tag for the caller to identify the request (e.g. citizen name).
+    /// Opaque tag for the caller to map responses back (e.g. citizen name).
     pub tag: String,
+    pub initiator: Citizen,
+    pub partner: Option<Citizen>,
 }
 
 impl PartialEq for InferenceRequest {
@@ -94,13 +101,49 @@ impl InferenceQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{Citizen, Emotion};
+
+    fn make_citizen(name: &str) -> Citizen {
+        Citizen {
+            name: name.into(),
+            personality_tags: vec![],
+            memory_summary: String::new(),
+            emotion: Emotion::Neutral,
+            relationships: vec![],
+            divine_awareness: 0.0,
+        }
+    }
 
     fn req(priority: InferencePriority, tag: &str) -> InferenceRequest {
         InferenceRequest {
             priority,
-            prompt: format!("prompt for {tag}"),
             tag: tag.into(),
+            initiator: make_citizen(tag),
+            partner: None,
         }
+    }
+
+    #[test]
+    fn request_stores_initiator_not_prompt() {
+        let req = InferenceRequest {
+            priority: InferencePriority::Normal,
+            tag: "Kael".into(),
+            initiator: make_citizen("Kael"),
+            partner: Some(make_citizen("Elder")),
+        };
+        assert_eq!(req.initiator.name, "Kael");
+        assert_eq!(req.partner.unwrap().name, "Elder");
+    }
+
+    #[test]
+    fn divine_voice_request_has_no_partner() {
+        let req = InferenceRequest {
+            priority: InferencePriority::High,
+            tag: "Kael".into(),
+            initiator: make_citizen("Kael"),
+            partner: None,
+        };
+        assert!(req.partner.is_none());
     }
 
     #[test]

@@ -73,10 +73,10 @@ impl MemoryBuffer {
     }
 
     /// Apply compression: replace the oldest N entries with a single summary entry.
-    /// `summary_tick` should be the tick of the newest compressed entry.
-    pub fn apply_compression(&mut self, summary: String) {
+    /// Returns `true` if compression was applied, `false` if there were not enough entries.
+    pub fn apply_compression(&mut self, summary: String) -> bool {
         if self.entries.len() <= COMPRESS_OLDEST_COUNT {
-            return;
+            return false;
         }
 
         let summary_tick = self.entries[COMPRESS_OLDEST_COUNT - 1].tick;
@@ -87,6 +87,7 @@ impl MemoryBuffer {
             content: format!("[summary] {summary}"),
         });
         self.entries.extend(remaining);
+        true
     }
 
     /// Build a prompt for the LLM to summarize the given entries.
@@ -197,8 +198,16 @@ mod tests {
     #[test]
     fn apply_compression_noop_when_too_few() {
         let mut buf = fill_buffer(10);
-        buf.apply_compression("should not change".into());
+        let compressed = buf.apply_compression("should not change".into());
+        assert!(!compressed, "should return false when not enough entries");
         assert_eq!(buf.len(), 10);
+    }
+
+    #[test]
+    fn apply_compression_returns_true_when_applied() {
+        let mut buf = fill_buffer(70);
+        let compressed = buf.apply_compression("summary".into());
+        assert!(compressed, "should return true when compression was applied");
     }
 
     #[test]
