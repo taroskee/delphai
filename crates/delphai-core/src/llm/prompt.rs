@@ -25,60 +25,58 @@ pub struct DivineVoicePromptInput<'a> {
     pub message: &'a str,
 }
 
+/// Format a single citizen's profile block for inclusion in a prompt.
+fn format_citizen_block(citizen: &Citizen) -> String {
+    format!(
+        "[{}]\nPersonality: {}\nEmotion: {}\nMemory: {}",
+        citizen.name,
+        citizen.personality_tags.join(", "),
+        emotion_label(&citizen.emotion),
+        citizen.memory_summary,
+    )
+}
+
+/// Format the relationship line from `initiator` to `partner`, if one exists.
+fn format_relationship_line(initiator: &Citizen, partner_name: &str) -> Option<String> {
+    initiator
+        .relationships
+        .iter()
+        .find(|r| r.target_name == partner_name)
+        .map(|rel| {
+            format!(
+                "Relationship with {}: familiarity {:.0}%, trust {:.0}%",
+                partner_name,
+                rel.familiarity * 100.0,
+                rel.trust * 100.0,
+            )
+        })
+}
+
 /// Build a conversation prompt string for two citizens.
 pub fn build_conversation_prompt(input: &ConversationPromptInput) -> String {
     let mut parts = Vec::new();
 
-    // System context
     parts.push(format!(
         "You are simulating a primitive civilization. Era: {}. Setting: {}.",
         input.world.era, input.world.setting
     ));
 
-    // Initiator profile
-    parts.push(format!(
-        "\n[{}]\nPersonality: {}\nEmotion: {}\nMemory: {}",
-        input.initiator.name,
-        input.initiator.personality_tags.join(", "),
-        emotion_label(&input.initiator.emotion),
-        input.initiator.memory_summary,
-    ));
+    parts.push(format!("\n{}", format_citizen_block(input.initiator)));
 
-    // Relationship to partner
-    if let Some(rel) = input
-        .initiator
-        .relationships
-        .iter()
-        .find(|r| r.target_name == input.partner.name)
-    {
-        parts.push(format!(
-            "Relationship with {}: familiarity {:.0}%, trust {:.0}%",
-            input.partner.name,
-            rel.familiarity * 100.0,
-            rel.trust * 100.0,
-        ));
+    if let Some(line) = format_relationship_line(input.initiator, &input.partner.name) {
+        parts.push(line);
     }
 
-    // Partner profile
-    parts.push(format!(
-        "\n[{}]\nPersonality: {}\nEmotion: {}\nMemory: {}",
-        input.partner.name,
-        input.partner.personality_tags.join(", "),
-        emotion_label(&input.partner.emotion),
-        input.partner.memory_summary,
-    ));
+    parts.push(format!("\n{}", format_citizen_block(input.partner)));
 
-    // Divine voice (filtered by awareness)
     if let Some(voice) = input.divine_voice {
-        let filtered = filter_divine_voice(voice, input.initiator.divine_awareness);
-        if let Some(text) = filtered {
+        if let Some(text) = filter_divine_voice(voice, input.initiator.divine_awareness) {
             parts.push(format!("\n[Divine Voice]: {text}"));
         }
     }
 
-    // Instruction
     parts.push(format!(
-        "\nGenerate {}'s response as JSON: {{\"speech\": \"...\", \"inner_thought\": \"...\", \"action\": \"...\", \"emotion_change\": \"...\", \"tech_hint\": null or \"...\"}}",
+        "\nGenerate {}'s response as YAML:\nspeech: ...\ninner_thought: ...\naction: ...\nemotion_change: ...\ntech_hint: ~  # null if none",
         input.initiator.name,
     ));
 
@@ -111,7 +109,7 @@ pub fn build_divine_voice_prompt(input: &DivineVoicePromptInput) -> String {
     }
 
     parts.push(format!(
-        "\nGenerate {}'s response as JSON: {{\"speech\": \"...\", \"inner_thought\": \"...\", \"action\": \"...\", \"emotion_change\": \"...\", \"tech_hint\": null or \"...\"}}",
+        "\nGenerate {}'s response as YAML:\nspeech: ...\ninner_thought: ...\naction: ...\nemotion_change: ...\ntech_hint: ~  # null if none",
         input.citizen.name,
     ));
 
@@ -187,34 +185,13 @@ pub fn build_batch_conversation_prompt(input: &BatchConversationInput) -> String
     for (idx, (initiator, partner)) in input.pairs.iter().enumerate() {
         parts.push(format!("\n--- Pair {} ---", idx + 1));
 
-        parts.push(format!(
-            "[{}]\nPersonality: {}\nEmotion: {}\nMemory: {}",
-            initiator.name,
-            initiator.personality_tags.join(", "),
-            emotion_label(&initiator.emotion),
-            initiator.memory_summary,
-        ));
+        parts.push(format_citizen_block(initiator));
 
-        if let Some(rel) = initiator
-            .relationships
-            .iter()
-            .find(|r| r.target_name == partner.name)
-        {
-            parts.push(format!(
-                "Relationship with {}: familiarity {:.0}%, trust {:.0}%",
-                partner.name,
-                rel.familiarity * 100.0,
-                rel.trust * 100.0,
-            ));
+        if let Some(line) = format_relationship_line(initiator, &partner.name) {
+            parts.push(line);
         }
 
-        parts.push(format!(
-            "[{}]\nPersonality: {}\nEmotion: {}\nMemory: {}",
-            partner.name,
-            partner.personality_tags.join(", "),
-            emotion_label(&partner.emotion),
-            partner.memory_summary,
-        ));
+        parts.push(format_citizen_block(partner));
 
         if let Some(voice) = input.divine_voice {
             if let Some(text) = filter_divine_voice(voice, initiator.divine_awareness) {
@@ -224,7 +201,7 @@ pub fn build_batch_conversation_prompt(input: &BatchConversationInput) -> String
     }
 
     parts.push(format!(
-        "\nRespond with a JSON array of {} objects, one per pair, each: {{\"speech\": \"...\", \"inner_thought\": \"...\", \"action\": \"...\", \"emotion_change\": \"...\", \"tech_hint\": null or \"...\"}}",
+        "\nRespond with a YAML sequence of {} mappings, one per pair:\n- speech: ...\n  inner_thought: ...\n  action: ...\n  emotion_change: ...\n  tech_hint: ~",
         input.pairs.len(),
     ));
 
@@ -413,7 +390,7 @@ mod tests {
         let prompt = build_conversation_prompt(&input);
         assert!(prompt.contains("speech"));
         assert!(prompt.contains("inner_thought"));
-        assert!(prompt.contains("JSON"));
+        assert!(prompt.contains("YAML"));
     }
 
     // --- build_divine_voice_prompt ---
@@ -480,7 +457,7 @@ mod tests {
             divine_voice: None,
         };
         let prompt = build_batch_conversation_prompt(&input);
-        assert!(prompt.contains("JSON array of 1 objects"));
+        assert!(prompt.contains("YAML sequence of 1"));
     }
 
     #[test]
