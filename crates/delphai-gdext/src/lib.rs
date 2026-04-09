@@ -131,6 +131,20 @@ impl WorldNode {
         GString::from(prompt.unwrap_or_default())
     }
 
+    /// Record that `listener_idx` heard `speaker_name` say `speech`.
+    /// Appended to memory_summary so the next prompt includes it as context.
+    #[func]
+    fn record_heard_speech(&mut self, listener_idx: i64, speaker_name: GString, speech: GString) {
+        let Some(world) = &mut self.world else { return };
+        let Some(citizen) = world.citizens.get_mut(listener_idx as usize) else { return };
+        let entry = format!("{} said: \"{}\"", speaker_name, speech);
+        if citizen.memory_summary.is_empty() {
+            citizen.memory_summary = entry;
+        } else {
+            citizen.memory_summary = format!("{}\n{}", citizen.memory_summary, entry);
+        }
+    }
+
     /// Apply an LLM response to a citizen (speech + emotion string).
     #[func]
     fn apply_citizen_response(&mut self, idx: i64, speech: GString, emotion: GString) {

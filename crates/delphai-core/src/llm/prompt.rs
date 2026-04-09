@@ -71,7 +71,10 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> String {
 
     if let Some(voice) = input.divine_voice {
         if let Some(text) = filter_divine_voice(voice, input.initiator.divine_awareness) {
-            parts.push(format!("\n[Divine Voice]: {text}"));
+            parts.push(format!(
+                "\n[SUPERNATURAL EVENT — respond to this NOW]\nJust this moment, {} heard a mysterious disembodied voice say: \"{text}\"\nThis was sudden and inexplicable — {} must react with surprise and share what they heard with {}. Do NOT treat this as a topic or theme. It is a real event that just happened.",
+                input.initiator.name, input.initiator.name, input.partner.name
+            ));
         }
     }
 

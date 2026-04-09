@@ -16,8 +16,10 @@ var _http: HTTPRequest
 var _llm_queue: Array = []
 var _llm_busy: bool = false
 var _current_pair: Dictionary = {}
+var _log_file: FileAccess = null
 
 func _ready() -> void:
+	_open_log_file()
 	_build_world()
 	_build_ui()
 	_log_message("=== 焚き火デモ 起動 ===")
@@ -233,6 +235,9 @@ func _on_http_completed(
 		# Queue partner's reply (once only — is_reply prevents infinite ping-pong)
 		if not _current_pair.get("is_reply", false):
 			var p_idx: int = _current_pair.get("partner_idx", 1)
+			# Give partner context: they heard what the initiator just said
+			if _world_sim:
+				_world_sim.record_heard_speech(p_idx, i_name, speech)
 			_llm_queue.append({
 				"initiator_idx": p_idx,
 				"partner_idx": i_idx,
@@ -302,10 +307,23 @@ func _strip_code_fences(text: String) -> String:
 		result.append(line)
 	return "\n".join(result).strip_edges()
 
+func _open_log_file() -> void:
+	DirAccess.make_dir_recursive_absolute("user://logs")
+	var t := Time.get_datetime_dict_from_system()
+	var fname := "user://logs/conv_%04d%02d%02d_%02d%02d%02d.log" % [
+		t["year"], t["month"], t["day"], t["hour"], t["minute"], t["second"]
+	]
+	_log_file = FileAccess.open(fname, FileAccess.WRITE)
+	if not _log_file:
+		push_warning("会話ログファイルを開けませんでした: " + fname)
+
 func _log_message(msg: String) -> void:
 	if not _conv_log:
 		return
 	_conv_log.append_text(msg + "\n")
+	if _log_file:
+		_log_file.store_line(msg)
+		_log_file.flush()
 	await get_tree().process_frame
 	if _log_scroll:
 		_log_scroll.scroll_vertical = int(_log_scroll.get_v_scroll_bar().max_value)
