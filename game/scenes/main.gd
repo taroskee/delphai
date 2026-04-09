@@ -162,10 +162,15 @@ func _call_ollama_for_pair(i_idx: int, p_idx: int) -> void:
 		return
 	var prompt: String = _world_sim.build_conversation_prompt_str(i_idx, p_idx)
 	if prompt.is_empty():
+		var i_name: String = _world_sim.get_citizen_name(i_idx)
+		_log_message("[デバッグ] %s のプロンプト構築失敗（メソッド未登録の可能性）" % i_name)
 		return
 	# Clear divine voice after it is baked into this prompt so it doesn't
 	# silently influence every subsequent conversation.
 	_world_sim.clear_divine_voice()
+	var i_name: String = _world_sim.get_citizen_name(i_idx)
+	var p_name: String = _world_sim.get_citizen_name(p_idx)
+	_log_message("[LLM送信] %s → %s (%d文字)" % [i_name, p_name, prompt.length()])
 	_llm_busy = true
 	_send_ollama_request(prompt)
 
@@ -206,11 +211,17 @@ func _on_http_completed(
 		_process_llm_queue()
 		return
 
-	var yaml_text: String = parsed["response"]
+	var raw_response: String = parsed["response"]
+	# Strip markdown code fences (LLMs often wrap YAML in ```yaml ... ```)
+	var yaml_text := _strip_code_fences(raw_response)
+	_log_message("[生データ] " + yaml_text.left(160).replace("\n", " ↵ "))
+
 	var speech := _extract_yaml_field(yaml_text, "speech")
 	var emotion := _extract_yaml_field(yaml_text, "emotion_change")
 
-	if not speech.is_empty() and _world_sim:
+	if speech.is_empty():
+		_log_message("[デバッグ] speech フィールドが空 — YAML: " + yaml_text.left(120))
+	elif _world_sim:
 		var i_idx: int = _current_pair.get("initiator_idx", 0)
 		var i_name: String = _world_sim.get_citizen_name(i_idx)
 		_world_sim.apply_citizen_response(i_idx, speech, emotion)
@@ -270,6 +281,17 @@ func _extract_yaml_field(text: String, field: String) -> String:
 			if value != "~" and value != "null" and not value.is_empty():
 				return value
 	return ""
+
+## Strip markdown code fences (```yaml ... ``` or ``` ... ```) from LLM output.
+func _strip_code_fences(text: String) -> String:
+	var lines := text.split("\n")
+	var result: PackedStringArray = []
+	for line in lines:
+		var stripped := line.strip_edges()
+		if stripped.begins_with("```"):
+			continue  # drop fence lines
+		result.append(line)
+	return "\n".join(result).strip_edges()
 
 func _log_message(msg: String) -> void:
 	if not _conv_log:
