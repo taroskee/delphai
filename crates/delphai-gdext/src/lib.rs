@@ -1,3 +1,7 @@
+// `godot_api` proc-macro generates Result<_, CallError> where CallError is large.
+// This is inherent to gdext and outside our control.
+#![allow(clippy::result_large_err)]
+
 use delphai_core::{
     agent::citizen::{Citizen, Emotion},
     llm::{

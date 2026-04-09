@@ -163,6 +163,9 @@ func _call_ollama_for_pair(i_idx: int, p_idx: int) -> void:
 	var prompt: String = _world_sim.build_conversation_prompt_str(i_idx, p_idx)
 	if prompt.is_empty():
 		return
+	# Clear divine voice after it is baked into this prompt so it doesn't
+	# silently influence every subsequent conversation.
+	_world_sim.clear_divine_voice()
 	_llm_busy = true
 	_send_ollama_request(prompt)
 
@@ -245,18 +248,22 @@ func _update_citizen_panels() -> void:
 		_citizen_emotion_labels[i].text = _world_sim.get_citizen_emotion(i)
 
 ## Extract a single-line YAML field value.
-## Handles both `speech: foo bar` and `speech: "foo bar"` forms.
+## Handles `field: foo bar`, `field: "foo bar"`, and `field: 'foo bar'`.
+## Does NOT support YAML block scalars (| / >) — skips them as empty.
 func _extract_yaml_field(text: String, field: String) -> String:
 	for line in text.split("\n"):
 		var stripped := line.strip_edges()
 		var prefix := field + ":"
 		if stripped.begins_with(prefix):
 			var value := stripped.substr(prefix.length()).strip_edges()
-			# Strip surrounding quotes if present
+			# Block scalar indicators are multi-line — skip, return empty
+			if value == "|" or value == ">" or value == "|-" or value == ">-":
+				return ""
+			# Strip surrounding quotes
 			if (value.begins_with('"') and value.ends_with('"')) or \
 			   (value.begins_with("'") and value.ends_with("'")):
 				value = value.substr(1, value.length() - 2)
-			if value != "~" and value != "null":
+			if value != "~" and value != "null" and not value.is_empty():
 				return value
 	return ""
 
