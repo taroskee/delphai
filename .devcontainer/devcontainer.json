@@ -1,17 +1,31 @@
 {
-  "name": "delphai",
-  "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
+  "name": "Delphai: Claude + ECC",
+ 
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:22-bookworm",
   "features": {
-    "ghcr.io/devcontainers/features/github-cli:1": {}
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers-extra/features/pnpm:2": {},
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.13"
+    },
+    "ghcr.io/devcontainers/features/rust:1": {}
   },
+
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+ 
   "customizations": {
     "vscode": {
       "extensions": [
+        "bierner.markdown-mermaid",
+        "charliermarsh.ruff",
+        "ms-python.python",
         "rust-lang.rust-analyzer",
-        "tamasfe.even-better-toml",
-        "vadimcn.vscode-lldb@1.11.0"
+        "tamasfe.even-better-toml"
       ]
     }
   },
-  "postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash"
+  "mounts": [
+      "source=${localEnv:HOME}/.claude,target=/home/node/.claude,type=bind,consistency=cached",
+      "source=${localEnv:HOME}/.claude.json,target=/home/node/.claude.json,type=bind,consistency=cached"
+  ]
 }

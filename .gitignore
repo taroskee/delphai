@@ -1,3 +1,5 @@
 /target
 *.import
 .godot/
+**/.DS_Store
+**/*.log
