@@ -48,12 +48,16 @@ impl WorldNode {
     /// Create the world with 3 hardcoded citizens for the campfire demo.
     #[func]
     fn initialize(&mut self) {
-        let citizens = vec![
-            make_citizen("Kael", &["curious", "optimistic"]),
-            make_citizen("Elder", &["wise", "cautious"]),
-            make_citizen("Hara", &["brave", "impulsive"]),
-        ];
-        self.world = Some(World::new(citizens));
+        let mut kael = make_citizen("Kael", &["curious", "optimistic"]);
+        kael.divine_awareness = 1.0; // Kael hears the divine voice clearly
+
+        let mut elder = make_citizen("Elder", &["wise", "cautious"]);
+        elder.divine_awareness = 0.65; // Elder hears it as "oracle" fragments
+
+        let hara = make_citizen("Hara", &["brave", "impulsive"]);
+        // Hara has 0.0 awareness — the voice doesn't reach her
+
+        self.world = Some(World::new(vec![kael, elder, hara]));
     }
 
     /// Advance one game turn. Returns Array of {initiator_idx, partner_idx} Dictionaries.
