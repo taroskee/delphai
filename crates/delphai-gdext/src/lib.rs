@@ -248,5 +248,6 @@ mod tests {
         let prompt = build_prompt_for_pair(Some(&world), 0, 1, None).unwrap();
         assert!(prompt.contains("speech"), "missing speech field");
         assert!(prompt.contains("YAML"), "missing YAML format instruction");
+        assert!(prompt.contains("Japanese"), "missing Japanese language instruction");
     }
 }

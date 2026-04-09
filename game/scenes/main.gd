@@ -12,7 +12,7 @@ var _log_scroll: ScrollContainer
 var _voice_input: LineEdit
 var _http: HTTPRequest
 
-# LLM call queue: Array of {initiator_idx, partner_idx}
+# LLM call queue: Array of {initiator_idx, partner_idx, is_reply}
 var _llm_queue: Array = []
 var _llm_busy: bool = false
 var _current_pair: Dictionary = {}
@@ -229,6 +229,15 @@ func _on_http_completed(
 		if i_idx < _citizen_speech_labels.size():
 			_citizen_speech_labels[i_idx].text = '"%s"' % speech
 		_update_citizen_panels()
+
+		# Queue partner's reply (once only — is_reply prevents infinite ping-pong)
+		if not _current_pair.get("is_reply", false):
+			var p_idx: int = _current_pair.get("partner_idx", 1)
+			_llm_queue.append({
+				"initiator_idx": p_idx,
+				"partner_idx": i_idx,
+				"is_reply": true,
+			})
 
 	_process_llm_queue()
 

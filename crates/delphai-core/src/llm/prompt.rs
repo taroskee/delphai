@@ -57,7 +57,7 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> String {
     let mut parts = Vec::new();
 
     parts.push(format!(
-        "You are simulating a primitive civilization. Era: {}. Setting: {}.",
+        "You are simulating a primitive civilization. Era: {}. Setting: {}.\nAll speech must be written in Japanese.",
         input.world.era, input.world.setting
     ));
 
@@ -76,7 +76,7 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> String {
     }
 
     parts.push(format!(
-        "\nGenerate {}'s response as YAML:\nspeech: ...\ninner_thought: ...\naction: ...\nemotion_change: ...\ntech_hint: ~  # null if none",
+        "\nGenerate {}'s response as YAML (speech must be in Japanese):\nspeech: ...\ninner_thought: ...\naction: ...\nemotion_change: ...\ntech_hint: ~  # null if none",
         input.initiator.name,
     ));
 
