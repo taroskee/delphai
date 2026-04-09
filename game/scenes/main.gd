@@ -1,6 +1,6 @@
 extends Node2D
 
-const OLLAMA_URL := "http://host.docker.internal:11434/api/generate"
+const OLLAMA_URL := "http://localhost:11434/api/generate"
 const OLLAMA_MODEL := "gemma4:e2b"
 
 var _world_sim
@@ -191,14 +191,18 @@ func _on_http_completed(
 	_llm_busy = false
 
 	if result != HTTPRequest.RESULT_SUCCESS or response_code != 200:
-		push_error("Ollama error: result=%d code=%d" % [result, response_code])
+		var msg := "[Ollama エラー] result=%d code=%d" % [result, response_code]
+		push_error(msg)
+		_log_message(msg)
 		_process_llm_queue()
 		return
 
 	var json_text := body.get_string_from_utf8()
 	var parsed = JSON.parse_string(json_text)
 	if parsed == null or not parsed.has("response"):
-		push_error("Unexpected Ollama response: " + json_text.left(200))
+		var msg := "[Ollama エラー] 予期しないレスポンス: " + json_text.left(120)
+		push_error(msg)
+		_log_message(msg)
 		_process_llm_queue()
 		return
 
