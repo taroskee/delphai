@@ -133,13 +133,12 @@ func _build_ui() -> void:
 	add_child(canvas)
 
 	var root_vbox := VBoxContainer.new()
-	root_vbox.anchor_right = 1.0
-	root_vbox.anchor_bottom = 1.0
+	canvas.add_child(root_vbox)
+	root_vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
 	root_vbox.offset_left = 12.0
 	root_vbox.offset_top = 12.0
 	root_vbox.offset_right = -12.0
 	root_vbox.offset_bottom = -12.0
-	canvas.add_child(root_vbox)
 
 	# Spacer pushes log to bottom
 	var spacer := Control.new()
