@@ -44,42 +44,108 @@ fn from_u8(v: u8) -> f32 { v as f32 / 255.0 }
 
 全パラメータが同じ 0.0〜1.0 範囲なので変換ロジックは共通1つで済む。
 
+### 4. `(a * b) >> 8` 演算による自然減衰
+
+u8 同士の乗算を右シフト8ビットすることで、**範囲を保ったまま乗算**できる。
+
+```rust
+// u8 固定小数点乗算（u8 × u8 → u8）
+fn mul_u8(a: u8, b: u8) -> u8 {
+    ((a as u16 * b as u16) >> 8) as u8
+}
+```
+
+- `255 * 255 = 65025 >> 8 = 254` — ほぼ上限を保つ
+- `128 * 128 = 16384 >> 8 = 64`  — 50% × 50% = 25%
+- `255 * 200 = 51000 >> 8 = 199` — 78% 減衰率を1ティックで適用
+
+**自然減衰への応用**:
+
+```rust
+const DECAY_FED: u8 = 250;  // 1ティックあたり ~98% 維持（徐々に空腹に）
+
+fn tick(fed: u8) -> u8 {
+    mul_u8(fed, DECAY_FED)
+}
+```
+
+- 整数演算のみで浮動小数点不要 → **SIMD 並列化に適合**
+- 減衰率は `u8` 定数1つで調整可能（ゲームバランス調整が容易）
+
+### 5. プレイヤーTickで演算が必要な属性は8個に制約
+
+プレイヤーの干渉（祈り、命令等）によって毎ティック再計算が必要な属性は、**8個（2の冪乗）** を上限とする。
+
+**理由**:
+- u8 × 8 = 64 bit → 1レジスタ（x86-64 / ARM64）に収まる
+- SIMD命令（AVX2: 256bit = 住民32人分を1命令）で並列処理可能
+- キャッシュラインに収まりやすい（64 bytes = 住民8人分のティック属性）
+
+**設計指針**:
+
+| 優先度 | 属性 | 毎ティック演算 | 備考 |
+|---|---|---|---|
+| 1 | `fed` | `mul_u8(fed, DECAY)` | 旧 `hunger` を反転。255=満腹、0=飢餓 |
+| 2 | `rested` | `mul_u8(rested, DECAY)` | 旧 `fatigue` を反転。255=元気、0=疲弊 |
+| 3〜8 | （Phase 2以降で追加） | | 上限8個を守る |
+
+> `fed` / `rested` は「不足量」ではなく「充足量」で表現する。自然減衰が「時間経過で減る」という直感に合致するため。
+
 ## 現行パラメータ一覧
 
 ### Needs（欲求）
 
-| パラメータ | 意味 | 回復手段 | Phase |
-|---|---|---|---|
-| hunger | 空腹度 | 食事 | 1 |
-| fatigue | 疲労度 | 睡眠 | 1 |
+> `(a*b)>>8` 演算による自然減衰を使用。毎ティック自動減少するため、補充行動（食事・睡眠）で能動的に回復させる設計。
+
+| パラメータ | 意味 | 補充手段 | 自然減衰 | Phase |
+|---|---|---|---|---|
+| fed | 満腹度。255=満腹、0=飢餓 | 食事 | 毎ティック `mul_u8(fed, DECAY_FED)` | 1 |
+| rested | 覚醒度。255=元気、0=疲弊 | 睡眠 | 毎ティック `mul_u8(rested, DECAY_RESTED)` | 1 |
 
 ### 将来追加予定
 
 | パラメータ | 意味 | 備考 | Phase |
 |---|---|---|---|
 | thirst | 渇き | 真水で回復。海水は不可（水源の種類が重要） | 2+ |
-| nutrition | 栄養状態 | hunger=量、nutrition=質。偏食→病気リスク | 2+ |
+| nutrition | 栄養状態 | fed=量、nutrition=質。偏食→病気リスク | 2+ |
 | wealth | 相対的な富 | 集団内での相対位置。貨幣経済 | 3+ |
 
 ### Needs 拡張パス
 
-Phase 1 では固定フィールド構造体を使用する:
+Phase 1 では固定フィールド構造体を使用する（`f32`、後に `u8` へ移行）:
 
 ```rust
-struct Needs { pub hunger: f32, pub fatigue: f32 }
+struct Needs { pub fed: f32, pub rested: f32 }
 ```
 
-Phase 2+ でフィールド追加が頻繁になった場合、enum インデックス配列に移行する:
+Phase 2+ で `u8` へ移行し、プレイヤーTick属性は8個以内の配列に統一する:
 
 ```rust
-#[repr(u8)]
-enum NeedKind { Hunger = 0, Fatigue = 1, Thirst = 2, Nutrition = 3 }
+// u8 固定小数点乗算
+fn mul_u8(a: u8, b: u8) -> u8 { ((a as u16 * b as u16) >> 8) as u8 }
 
-struct Needs { values: [f32; NeedKind::COUNT] }
+// 減衰定数（チューニング可能）
+const DECAY_FED: u8    = 250; // ~98%/tick
+const DECAY_RESTED: u8 = 252; // ~99%/tick（睡眠は空腹より緩やか）
+
+// プレイヤーTick属性（最大8個 = 64bit）
+#[repr(u8)]
+enum NeedKind { Fed = 0, Rested = 1, /* ... 最大8 */ }
+const NEED_COUNT: usize = 8;
+
+struct Needs { values: [u8; NEED_COUNT] }
 
 impl Needs {
-    pub fn hunger(&self) -> f32 { self.values[NeedKind::Hunger as usize] }
-    // ... accessor methods でAPI互換を保つ
+    pub fn fed(&self)    -> u8 { self.values[NeedKind::Fed    as usize] }
+    pub fn rested(&self) -> u8 { self.values[NeedKind::Rested as usize] }
+
+    /// 毎ティック呼ばれる自然減衰
+    pub fn tick(&self) -> Self {
+        let mut next = *self;
+        next.values[NeedKind::Fed    as usize] = mul_u8(self.fed(),    DECAY_FED);
+        next.values[NeedKind::Rested as usize] = mul_u8(self.rested(), DECAY_RESTED);
+        next
+    }
 }
 ```
 
