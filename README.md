@@ -9,6 +9,31 @@ DLC: 住民を細胞、世界を人体にした版。
 
 ---
 
+## 開発環境セットアップ
+
+### Godot MCP（Claude CodeからGodotを操作する）
+
+ローカルのGodot GUIをdevcontainer内のClaude Codeから操作するための設定。
+
+**host側（Macターミナル）:**
+```bash
+# supergatewayでgodot-mcpをSSEサーバとして公開
+npx supergateway --stdio "npx @coding-solo/godot-mcp" --port 3001
+```
+
+**devcontainer側（初回のみ）:**
+```bash
+# stdioからSSEに切り替え（setup.shで自動設定済みの場合は不要）
+claude mcp remove godot
+claude mcp add --transport sse godot http://host.docker.internal:3001/sse
+```
+
+その後Claude Codeを再起動すると `mcp__godot__*` ツールが使えるようになる。
+
+Godotプロジェクトのパスはhost側のパスで指定する（例: `/Users/machina/Documents/delphai/game`）。
+
+---
+
 ## よく間違えること
 
 ### プレイヤーにできることは3つだけ

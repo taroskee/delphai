@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-OLLAMA_URL = "http://localhost:11434"
+OLLAMA_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
 # --- JSON mode ---
 SYSTEM_JSON = "You are a JSON-only responder. All fields must be non-null Japanese strings. No explanation, no markdown."

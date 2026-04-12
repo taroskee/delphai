@@ -36,6 +36,8 @@ cat > ~/.claude/settings.json << 'EOF'
 }
 EOF
 
+claude mcp add godot -- npx @coding-solo/godot-mcp
+
 echo ""
 echo "✅ Setup complete!"
 echo "   コンテナ内で 'claude' を実行して認証してください。"

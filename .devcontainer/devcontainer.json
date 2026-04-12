@@ -24,6 +24,10 @@
       ]
     }
   },
+  "remoteEnv": {
+    "OLLAMA_BASE_URL": "http://host.docker.internal:11434"
+  },
+
   "mounts": [
       "source=${localEnv:HOME}/.claude,target=/home/node/.claude,type=bind,consistency=cached",
       "source=${localEnv:HOME}/.claude.json,target=/home/node/.claude.json,type=bind,consistency=cached"
