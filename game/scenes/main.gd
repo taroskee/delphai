@@ -3,16 +3,25 @@ extends Node2D
 const OLLAMA_URL := "http://localhost:11434/api/generate"
 const OLLAMA_MODEL := "gemma4:e2b"
 
+const CitizenSpriteScript = preload("res://scenes/citizen_sprite.gd")
+
+# Character sprite paths (must have emotion frames: shake/nod/surprise/laugh)
+const CITIZEN_CHAR_PATHS: Array = ["chara/chara2_1", "chara/chara3_1", "chara/chara4_1"]
+# Positions around the campfire (1152 x 648 layout)
+const CITIZEN_POSITIONS: Array = [
+	Vector2(340, 410),   # Kael  — left
+	Vector2(576, 440),   # Elder — center, slightly forward
+	Vector2(820, 410),   # Hara  — right
+]
+
 var _world_sim
-var _citizen_name_labels: Array[Label] = []
-var _citizen_emotion_labels: Array[Label] = []
-var _citizen_speech_labels: Array[Label] = []
+var _citizen_sprites: Array = []
 var _conv_log: RichTextLabel
 var _log_scroll: ScrollContainer
 var _voice_input: LineEdit
 var _http: HTTPRequest
 
-# LLM call queue: Array of {initiator_idx, partner_idx, is_reply}
+# LLM call queue: Array of {initiator_idx, partner_idx, is_reply?}
 var _llm_queue: Array = []
 var _llm_busy: bool = false
 var _current_pair: Dictionary = {}
@@ -21,12 +30,13 @@ var _log_file: FileAccess = null
 func _ready() -> void:
 	_open_log_file()
 	_build_world()
+	_build_scene()
 	_build_ui()
 	_log_message("=== 焚き火デモ 起動 ===")
 	_update_citizen_panels()
 
 # ---------------------------------------------------------------------------
-# World setup
+# World simulation setup
 # ---------------------------------------------------------------------------
 
 func _build_world() -> void:
@@ -49,81 +59,112 @@ func _build_world() -> void:
 	_http.request_completed.connect(_on_http_completed)
 
 # ---------------------------------------------------------------------------
-# UI setup
+# 2D scene: background + fire + citizen sprites
+# ---------------------------------------------------------------------------
+
+func _build_scene() -> void:
+	_build_background()
+	_build_fire()
+	_build_citizen_sprites()
+
+func _build_background() -> void:
+	var bg_layer := CanvasLayer.new()
+	bg_layer.layer = -10
+	add_child(bg_layer)
+
+	# Night sky
+	var sky := ColorRect.new()
+	sky.color = Color(0.04, 0.06, 0.15, 1.0)
+	sky.size = Vector2(1152, 420)
+	sky.position = Vector2.ZERO
+	bg_layer.add_child(sky)
+
+	# Ground
+	var ground := ColorRect.new()
+	ground.color = Color(0.10, 0.15, 0.06, 1.0)
+	ground.size = Vector2(1152, 228)
+	ground.position = Vector2(0, 420)
+	bg_layer.add_child(ground)
+
+func _build_fire() -> void:
+	var fire_sprite := AnimatedSprite2D.new()
+	var fire_frames := SpriteFrames.new()
+	fire_frames.remove_animation("default")
+	fire_frames.add_animation("burn")
+	fire_frames.set_animation_speed("burn", 12.0)
+	fire_frames.set_animation_loop("burn", true)
+
+	var fire_base := "res://assets/effect/fires/loop/fireV002effect-loop/"
+	for i in range(10):
+		var path := fire_base + "fireV002effect-loop%03d.png" % i
+		if ResourceLoader.exists(path):
+			var tex := load(path) as Texture2D
+			if tex:
+				fire_frames.add_frame("burn", tex)
+
+	fire_sprite.sprite_frames = fire_frames
+	fire_sprite.scale = Vector2(0.55, 0.55)
+	fire_sprite.position = Vector2(576, 360)
+	if fire_frames.has_animation("burn") and fire_frames.get_frame_count("burn") > 0:
+		fire_sprite.play("burn")
+	add_child(fire_sprite)
+
+func _build_citizen_sprites() -> void:
+	if not _world_sim:
+		return
+	var count: int = _world_sim.get_citizen_count()
+	for i in range(count):
+		var cname: String = _world_sim.get_citizen_name(i)
+		var char_path: String = CITIZEN_CHAR_PATHS[i] if i < CITIZEN_CHAR_PATHS.size() else "chara/chara2_1"
+
+		var sprite_node := CitizenSpriteScript.new()
+		add_child(sprite_node)
+		sprite_node.position = CITIZEN_POSITIONS[i] if i < CITIZEN_POSITIONS.size() else Vector2(576, 420)
+		sprite_node.setup(cname, char_path)
+		_citizen_sprites.append(sprite_node)
+
+# ---------------------------------------------------------------------------
+# UI: log panel + voice input (CanvasLayer overlay)
 # ---------------------------------------------------------------------------
 
 func _build_ui() -> void:
 	var canvas := CanvasLayer.new()
+	canvas.layer = 10
 	add_child(canvas)
 
-	var root_panel := VBoxContainer.new()
-	root_panel.set_anchors_preset(Control.PRESET_FULL_RECT)
-	root_panel.offset_left = 20.0
-	root_panel.offset_top = 20.0
-	root_panel.offset_right = -20.0
-	root_panel.offset_bottom = -20.0
-	canvas.add_child(root_panel)
+	var root_vbox := VBoxContainer.new()
+	root_vbox.anchor_right = 1.0
+	root_vbox.anchor_bottom = 1.0
+	root_vbox.offset_left = 12.0
+	root_vbox.offset_top = 12.0
+	root_vbox.offset_right = -12.0
+	root_vbox.offset_bottom = -12.0
+	canvas.add_child(root_vbox)
 
-	# --- Citizens header ---
-	var citizens_label := Label.new()
-	citizens_label.text = "▼ 住民"
-	citizens_label.add_theme_font_size_override("font_size", 18)
-	root_panel.add_child(citizens_label)
+	# Spacer pushes log to bottom
+	var spacer := Control.new()
+	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	root_vbox.add_child(spacer)
 
-	# --- Citizen panels ---
-	var citizen_row := HBoxContainer.new()
-	root_panel.add_child(citizen_row)
-
-	for cname in ["Kael", "Elder", "Hara"]:
-		var vbox := VBoxContainer.new()
-		vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		citizen_row.add_child(vbox)
-
-		var name_label := Label.new()
-		name_label.text = cname
-		name_label.add_theme_font_size_override("font_size", 16)
-		vbox.add_child(name_label)
-		_citizen_name_labels.append(name_label)
-
-		var emotion_label := Label.new()
-		emotion_label.text = "neutral"
-		vbox.add_child(emotion_label)
-		_citizen_emotion_labels.append(emotion_label)
-
-		var speech_label := Label.new()
-		speech_label.text = ""
-		speech_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		speech_label.custom_minimum_size = Vector2(0, 40)
-		vbox.add_child(speech_label)
-		_citizen_speech_labels.append(speech_label)
-
-	# --- Separator ---
-	root_panel.add_child(HSeparator.new())
-
-	# --- Log area ---
-	var log_label := Label.new()
-	log_label.text = "▼ 会話ログ"
-	log_label.add_theme_font_size_override("font_size", 18)
-	root_panel.add_child(log_label)
-
+	# Log area
 	_log_scroll = ScrollContainer.new()
-	_log_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_log_scroll.custom_minimum_size = Vector2(0, 200)
-	root_panel.add_child(_log_scroll)
+	_log_scroll.custom_minimum_size = Vector2(0, 160)
+	root_vbox.add_child(_log_scroll)
 
 	_conv_log = RichTextLabel.new()
 	_conv_log.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_conv_log.fit_content = true
 	_conv_log.scroll_active = false
+	_conv_log.add_theme_color_override("default_color", Color(0.9, 0.9, 0.85, 1.0))
 	_log_scroll.add_child(_conv_log)
 
-	# --- Voice input row ---
+	# Voice input row
 	var voice_row := HBoxContainer.new()
-	root_panel.add_child(voice_row)
+	root_vbox.add_child(voice_row)
 
 	_voice_input = LineEdit.new()
 	_voice_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_voice_input.placeholder_text = "神の声を入力..."
+	_voice_input.placeholder_text = "声を届ける... 例: 「北の川に水源がある」「東の森に鹿の群れがいる」"
 	voice_row.add_child(_voice_input)
 
 	var voice_button := Button.new()
@@ -167,8 +208,7 @@ func _call_ollama_for_pair(i_idx: int, p_idx: int) -> void:
 		var i_name: String = _world_sim.get_citizen_name(i_idx)
 		_log_message("[デバッグ] %s のプロンプト構築失敗（メソッド未登録の可能性）" % i_name)
 		return
-	# Clear divine voice after it is baked into this prompt so it doesn't
-	# silently influence every subsequent conversation.
+	# Clear divine voice after baking it into this prompt
 	_world_sim.clear_divine_voice()
 	var i_name: String = _world_sim.get_citizen_name(i_idx)
 	var p_name: String = _world_sim.get_citizen_name(p_idx)
@@ -214,7 +254,6 @@ func _on_http_completed(
 		return
 
 	var raw_response: String = parsed["response"]
-	# Strip markdown code fences (LLMs often wrap YAML in ```yaml ... ```)
 	var yaml_text := _strip_code_fences(raw_response)
 	_log_message("[生データ] " + yaml_text.left(160).replace("\n", " ↵ "))
 
@@ -228,14 +267,18 @@ func _on_http_completed(
 		var i_name: String = _world_sim.get_citizen_name(i_idx)
 		_world_sim.apply_citizen_response(i_idx, speech, emotion)
 		_log_message("[%s] %s" % [i_name, speech])
-		if i_idx < _citizen_speech_labels.size():
-			_citizen_speech_labels[i_idx].text = '"%s"' % speech
+
+		# Update sprite: speech bubble + reaction animation
+		if i_idx < _citizen_sprites.size():
+			var awareness: float = _world_sim.get_divine_awareness(i_idx)
+			_citizen_sprites[i_idx].show_speech(speech)
+			_citizen_sprites[i_idx].play_reaction(awareness)
+
 		_update_citizen_panels()
 
-		# Queue partner's reply (once only — is_reply prevents infinite ping-pong)
+		# Queue partner's reply (once only)
 		if not _current_pair.get("is_reply", false):
 			var p_idx: int = _current_pair.get("partner_idx", 1)
-			# Give partner context: they heard what the initiator just said
 			if _world_sim:
 				_world_sim.record_heard_speech(p_idx, i_name, speech)
 			_llm_queue.append({
@@ -256,18 +299,25 @@ func _on_voice_pressed() -> void:
 		return
 	_log_message("[神の声] " + text)
 	_voice_input.clear()
-	if _world_sim:
-		_world_sim.set_divine_voice(text)
-		# Grow awareness for all citizens each time the divine voice is sent
-		var count: int = _world_sim.get_citizen_count()
-		for i in range(count):
-			_world_sim.grow_divine_awareness(i, 0.07)
-			var name: String = _world_sim.get_citizen_name(i)
-			var awareness_pct: int = roundi(_world_sim.get_divine_awareness(i) * 100)
-			_log_message("[awareness] %s: %d%%" % [name, awareness_pct])
-		# Queue a divine voice reaction from citizen[0] (Kael, the most aware)
-		_llm_queue.append({"initiator_idx": 0, "partner_idx": 1})
-		_process_llm_queue()
+	if not _world_sim:
+		return
+
+	_world_sim.set_divine_voice(text)
+
+	# Grow awareness for all citizens, play skeptical reaction on first encounter
+	var count: int = _world_sim.get_citizen_count()
+	for i in range(count):
+		_world_sim.grow_divine_awareness(i, 0.07)
+		var awareness: float = _world_sim.get_divine_awareness(i)
+		var cname: String = _world_sim.get_citizen_name(i)
+		var awareness_pct: int = roundi(awareness * 100)
+		_log_message("[awareness] %s: %d%%" % [cname, awareness_pct])
+		if i < _citizen_sprites.size():
+			_citizen_sprites[i].play_reaction(awareness)
+
+	# Queue a divine voice reaction from Kael (citizen 0)
+	_llm_queue.append({"initiator_idx": 0, "partner_idx": 1})
+	_process_llm_queue()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -278,24 +328,22 @@ func _update_citizen_panels() -> void:
 		return
 	var count: int = _world_sim.get_citizen_count()
 	for i in range(count):
-		if i >= _citizen_name_labels.size():
+		if i >= _citizen_sprites.size():
 			break
-		_citizen_name_labels[i].text = _world_sim.get_citizen_name(i)
-		_citizen_emotion_labels[i].text = _world_sim.get_citizen_emotion(i)
+		var emotion: String = _world_sim.get_citizen_emotion(i)
+		_citizen_sprites[i].set_emotion_label(emotion)
 
 ## Extract a single-line YAML field value.
 ## Handles `field: foo bar`, `field: "foo bar"`, and `field: 'foo bar'`.
-## Does NOT support YAML block scalars (| / >) — skips them as empty.
+## Does NOT support YAML block scalars (| / >) — returns empty for those.
 func _extract_yaml_field(text: String, field: String) -> String:
 	for line in text.split("\n"):
 		var stripped := line.strip_edges()
 		var prefix := field + ":"
 		if stripped.begins_with(prefix):
 			var value := stripped.substr(prefix.length()).strip_edges()
-			# Block scalar indicators are multi-line — skip, return empty
 			if value == "|" or value == ">" or value == "|-" or value == ">-":
 				return ""
-			# Strip surrounding quotes
 			if (value.begins_with('"') and value.ends_with('"')) or \
 			   (value.begins_with("'") and value.ends_with("'")):
 				value = value.substr(1, value.length() - 2)
@@ -303,14 +351,13 @@ func _extract_yaml_field(text: String, field: String) -> String:
 				return value
 	return ""
 
-## Strip markdown code fences (```yaml ... ``` or ``` ... ```) from LLM output.
+## Strip markdown code fences from LLM output.
 func _strip_code_fences(text: String) -> String:
 	var lines := text.split("\n")
 	var result: PackedStringArray = []
 	for line in lines:
-		var stripped := line.strip_edges()
-		if stripped.begins_with("```"):
-			continue  # drop fence lines
+		if line.strip_edges().begins_with("```"):
+			continue
 		result.append(line)
 	return "\n".join(result).strip_edges()
 
@@ -322,7 +369,6 @@ func _open_log_file() -> void:
 	]
 	_log_file = FileAccess.open(fname, FileAccess.WRITE)
 	if _log_file:
-		# Show the real OS path so the user can find the log file
 		var real_path := ProjectSettings.globalize_path(fname)
 		print("[LOG] 会話ログ: ", real_path)
 		_log_file.store_line("# ログパス: " + real_path)
