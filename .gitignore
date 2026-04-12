@@ -3,3 +3,10 @@
 .godot/
 **/.DS_Store
 **/*.log
+**/assets/**
+**/__pycache__
+
+# Allow prebuilt native libraries (built by CI)
+!prebuilt/**/*.dylib
+!prebuilt/**/*.so
+!prebuilt/**/*.dll
