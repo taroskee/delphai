@@ -4,6 +4,7 @@ const OLLAMA_URL := "http://localhost:11434/api/generate"
 const OLLAMA_MODEL := "gemma4:e2b"
 
 const CitizenSpriteScript = preload("res://scenes/citizen_sprite.gd")
+const MapScript = preload("res://scenes/map.gd")
 
 # Character sprite paths (must have emotion frames: shake/nod/surprise/laugh)
 const CITIZEN_CHAR_PATHS: Array = ["chara/chara2_1", "chara/chara3_1", "chara/chara4_1"]
@@ -63,35 +64,13 @@ func _build_world() -> void:
 # ---------------------------------------------------------------------------
 
 func _build_scene() -> void:
-	_build_background()
+	_build_map()
 	_build_fire()
 	_build_citizen_sprites()
 
-func _build_background() -> void:
-	var bg_layer := CanvasLayer.new()
-	bg_layer.layer = -10
-	add_child(bg_layer)
-
-	# Night sky
-	var sky := ColorRect.new()
-	sky.color = Color(0.03, 0.04, 0.12, 1.0)
-	sky.size = Vector2(1152, 648)
-	sky.position = Vector2.ZERO
-	bg_layer.add_child(sky)
-
-	# Ground — darker earth tone
-	var ground := ColorRect.new()
-	ground.color = Color(0.08, 0.11, 0.04, 1.0)
-	ground.size = Vector2(1152, 230)
-	ground.position = Vector2(0, 418)
-	bg_layer.add_child(ground)
-
-	# Campfire glow on ground — warm orange circle under fire
-	var glow := ColorRect.new()
-	glow.color = Color(0.55, 0.22, 0.02, 0.35)
-	glow.size = Vector2(220, 60)
-	glow.position = Vector2(576 - 110, 418)
-	bg_layer.add_child(glow)
+func _build_map() -> void:
+	var map := MapScript.new()
+	add_child(map)
 
 func _build_fire() -> void:
 	var fire_sprite := AnimatedSprite2D.new()
