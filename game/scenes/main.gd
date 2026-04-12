@@ -74,17 +74,24 @@ func _build_background() -> void:
 
 	# Night sky
 	var sky := ColorRect.new()
-	sky.color = Color(0.04, 0.06, 0.15, 1.0)
-	sky.size = Vector2(1152, 420)
+	sky.color = Color(0.03, 0.04, 0.12, 1.0)
+	sky.size = Vector2(1152, 648)
 	sky.position = Vector2.ZERO
 	bg_layer.add_child(sky)
 
-	# Ground
+	# Ground — darker earth tone
 	var ground := ColorRect.new()
-	ground.color = Color(0.10, 0.15, 0.06, 1.0)
-	ground.size = Vector2(1152, 228)
-	ground.position = Vector2(0, 420)
+	ground.color = Color(0.08, 0.11, 0.04, 1.0)
+	ground.size = Vector2(1152, 230)
+	ground.position = Vector2(0, 418)
 	bg_layer.add_child(ground)
+
+	# Campfire glow on ground — warm orange circle under fire
+	var glow := ColorRect.new()
+	glow.color = Color(0.55, 0.22, 0.02, 0.35)
+	glow.size = Vector2(220, 60)
+	glow.position = Vector2(576 - 110, 418)
+	bg_layer.add_child(glow)
 
 func _build_fire() -> void:
 	var fire_sprite := AnimatedSprite2D.new()
@@ -94,17 +101,18 @@ func _build_fire() -> void:
 	fire_frames.set_animation_speed("burn", 12.0)
 	fire_frames.set_animation_loop("burn", true)
 
-	var fire_base := "res://assets/effect/fires/loop/fireV002effect-loop/"
-	for i in range(10):
-		var path := fire_base + "fireV002effect-loop%03d.png" % i
+	# fireV005: 51×51px frames — at scale 2.5 renders as ~128×128px campfire
+	var fire_base := "res://assets/effect/fires/loop/fireV005effect-loop/"
+	for i in range(18):
+		var path := fire_base + "fireV005effect-loop%03d.png" % i
 		if ResourceLoader.exists(path):
 			var tex := load(path) as Texture2D
 			if tex:
 				fire_frames.add_frame("burn", tex)
 
 	fire_sprite.sprite_frames = fire_frames
-	fire_sprite.scale = Vector2(0.55, 0.55)
-	fire_sprite.position = Vector2(576, 360)
+	fire_sprite.scale = Vector2(2.5, 2.5)
+	fire_sprite.position = Vector2(576, 400)
 	if fire_frames.has_animation("burn") and fire_frames.get_frame_count("burn") > 0:
 		fire_sprite.play("burn")
 	add_child(fire_sprite)
