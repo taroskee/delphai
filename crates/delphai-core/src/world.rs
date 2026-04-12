@@ -10,6 +10,8 @@ use crate::llm::{
 
 const CONVERSATION_PROXIMITY: f32 = 50.0;
 const CONVERSATION_PROBABILITY: f32 = 0.5;
+/// Maximum number of entries kept in a citizen's memory_summary.
+const MEMORY_MAX_ENTRIES: usize = 8;
 
 /// Per-citizen resource needs, tracked by the world each tick.
 #[derive(Debug, Clone)]
@@ -137,19 +139,30 @@ pub fn apply_response(citizen: &mut Citizen, response: &CitizenResponse) {
     // Map emotion_change string → Emotion enum
     citizen.emotion = parse_emotion(&response.emotion_change);
 
-    // Append speech to memory if non-empty
+    // Append speech to memory if non-empty, capped at MEMORY_MAX_ENTRIES
     if !response.speech.is_empty() {
-        if citizen.memory_summary.is_empty() {
-            citizen.memory_summary = response.speech.clone();
-        } else {
-            citizen.memory_summary
-                .push_str(&format!(" | {}", response.speech));
-        }
+        append_memory(&mut citizen.memory_summary, &response.speech, " | ", MEMORY_MAX_ENTRIES);
     }
 
     // Log tech hints for future use
     if let Some(hint) = &response.tech_hint {
         eprintln!("[tech_hint] {}: {hint}", citizen.name);
+    }
+}
+
+/// Append `entry` to `summary` using `sep` as separator.
+/// Keeps at most `max_entries` entries by dropping the oldest when the limit is exceeded.
+pub fn append_memory(summary: &mut String, entry: &str, sep: &str, max_entries: usize) {
+    if summary.is_empty() {
+        *summary = entry.to_string();
+        return;
+    }
+    summary.push_str(sep);
+    summary.push_str(entry);
+    // Trim to max_entries
+    let entries: Vec<&str> = summary.split(sep).collect();
+    if entries.len() > max_entries {
+        *summary = entries[entries.len() - max_entries..].join(sep);
     }
 }
 
@@ -341,6 +354,28 @@ mod tests {
         };
         apply_response(&mut citizen, &response);
         assert_eq!(citizen.memory_summary, "found berries | Let us gather food");
+    }
+
+    #[test]
+    fn append_memory_caps_at_max_entries() {
+        let mut summary = String::new();
+        for i in 0..10 {
+            append_memory(&mut summary, &format!("entry{i}"), " | ", 8);
+        }
+        let entries: Vec<&str> = summary.split(" | ").collect();
+        assert_eq!(entries.len(), 8);
+        assert_eq!(entries[0], "entry2"); // oldest kept is entry2
+        assert_eq!(entries[7], "entry9");
+    }
+
+    #[test]
+    fn append_memory_within_limit_keeps_all() {
+        let mut summary = String::new();
+        for i in 0..5 {
+            append_memory(&mut summary, &format!("e{i}"), " | ", 8);
+        }
+        let entries: Vec<&str> = summary.split(" | ").collect();
+        assert_eq!(entries.len(), 5);
     }
 
     #[test]

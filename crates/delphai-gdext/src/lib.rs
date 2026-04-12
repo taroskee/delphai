@@ -8,7 +8,7 @@ use delphai_core::{
         prompt::{build_conversation_prompt, ConversationPromptInput, WorldContext},
         provider::CitizenResponse,
     },
-    world::{apply_response, World},
+    world::{append_memory, apply_response, World},
 };
 use godot::prelude::*;
 
@@ -157,11 +157,7 @@ impl WorldNode {
         let Some(world) = &mut self.world else { return };
         let Some(citizen) = world.citizens.get_mut(listener_idx as usize) else { return };
         let entry = format!("{} said: \"{}\"", speaker_name, speech);
-        if citizen.memory_summary.is_empty() {
-            citizen.memory_summary = entry;
-        } else {
-            citizen.memory_summary = format!("{}\n{}", citizen.memory_summary, entry);
-        }
+        append_memory(&mut citizen.memory_summary, &entry, "\n", 8);
     }
 
     /// Apply an LLM response to a citizen (speech + emotion string).
