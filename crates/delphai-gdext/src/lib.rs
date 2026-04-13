@@ -8,6 +8,7 @@ use delphai_core::{
         prompt::{build_conversation_prompt, ConversationPromptInput, WorldContext},
         provider::CitizenResponse,
     },
+    pathfinding::{MoveState, TilePos, WalkGrid},
     world::{append_memory, apply_response, World},
 };
 use godot::prelude::*;
@@ -45,19 +46,30 @@ impl INode for WorldNode {
 
 #[godot_api]
 impl WorldNode {
-    /// Create the world with 3 hardcoded citizens for the campfire demo.
+    /// Create the world with 3 hardcoded citizens and set their initial tile positions.
     #[func]
     fn initialize(&mut self) {
         let mut kael = make_citizen("Kael", &["curious", "optimistic"]);
-        kael.divine_awareness = 1.0; // Kael hears the divine voice clearly
+        kael.divine_awareness = 1.0;
 
         let mut elder = make_citizen("Elder", &["wise", "cautious"]);
-        elder.divine_awareness = 0.65; // Elder hears it as "oracle" fragments
+        elder.divine_awareness = 0.65;
 
         let hara = make_citizen("Hara", &["brave", "impulsive"]);
-        // Hara has 0.0 awareness — the voice doesn't reach her
 
-        self.world = Some(World::new(vec![kael, elder, hara]));
+        let mut world = World::new(vec![kael, elder, hara]);
+
+        // Place citizens at their starting tiles on the 24×14 map.
+        // Kael=(7,8) wander_radius=4, Elder=(12,8) radius=3, Hara=(17,8) radius=4
+        let starts: &[(i16, i16, u32)] = &[(7, 8, 4), (12, 8, 3), (17, 8, 4)];
+        for (i, &(x, y, r)) in starts.iter().enumerate() {
+            if let Some(state) = world.move_states.get_mut(i) {
+                let pos = TilePos::new(x, y);
+                *state = MoveState::new(pos, pos, r);
+            }
+        }
+
+        self.world = Some(world);
     }
 
     /// Advance one game turn. Returns Array of {initiator_idx, partner_idx} Dictionaries.
@@ -123,7 +135,6 @@ impl WorldNode {
     }
 
     /// Build an Ollama-ready conversation prompt for two citizens by index.
-    /// Returns empty string if world is uninitialised or indices are out of range.
     #[func]
     fn build_conversation_prompt_str(&self, i_idx: i64, p_idx: i64) -> GString {
         let prompt =
@@ -142,7 +153,6 @@ impl WorldNode {
     }
 
     /// Increase a citizen's divine awareness by `delta` (clamped to [0, 1]).
-    /// Call this each time the player's voice reaches the world.
     #[func]
     fn grow_divine_awareness(&mut self, citizen_idx: i64, delta: f64) {
         let Some(world) = &mut self.world else { return };
@@ -151,7 +161,6 @@ impl WorldNode {
     }
 
     /// Record that `listener_idx` heard `speaker_name` say `speech`.
-    /// Appended to memory_summary so the next prompt includes it as context.
     #[func]
     fn record_heard_speech(&mut self, listener_idx: i64, speaker_name: GString, speech: GString) {
         let Some(world) = &mut self.world else { return };
@@ -163,12 +172,8 @@ impl WorldNode {
     /// Apply an LLM response to a citizen (speech + emotion string).
     #[func]
     fn apply_citizen_response(&mut self, idx: i64, speech: GString, emotion: GString) {
-        let Some(world) = &mut self.world else {
-            return;
-        };
-        let Some(citizen) = world.citizens.get_mut(idx as usize) else {
-            return;
-        };
+        let Some(world) = &mut self.world else { return };
+        let Some(citizen) = world.citizens.get_mut(idx as usize) else { return };
         let response = CitizenResponse {
             speech: speech.to_string(),
             inner_thought: String::new(),
@@ -178,10 +183,40 @@ impl WorldNode {
         };
         apply_response(citizen, &response);
     }
+
+    /// Upload the walkability grid from GDScript (1=walkable, 0=blocked).
+    /// Call this once during _ready after the TileMap is built.
+    #[func]
+    fn set_walkable_map(&mut self, data: PackedByteArray, width: i64, height: i64) {
+        let cells: Vec<bool> = data.to_vec().iter().map(|&b| b != 0).collect();
+        let grid = WalkGrid::new(width as usize, height as usize, cells);
+        if let Some(world) = &mut self.world {
+            world.walk_grid = Some(grid);
+        }
+    }
+
+    /// Return the tile position of citizen `idx` as Vector2i(col, row).
+    #[func]
+    fn get_citizen_tile_pos(&self, idx: i64) -> Vector2i {
+        self.world
+            .as_ref()
+            .and_then(|w| w.move_states.get(idx as usize))
+            .map(|s| Vector2i::new(s.tile_pos.x as i32, s.tile_pos.y as i32))
+            .unwrap_or_default()
+    }
+
+    /// Return the facing direction of citizen `idx`: 0=down 1=left 2=right 3=up.
+    #[func]
+    fn get_citizen_facing(&self, idx: i64) -> i64 {
+        self.world
+            .as_ref()
+            .and_then(|w| w.move_states.get(idx as usize))
+            .map(|s| s.facing as i64)
+            .unwrap_or(0)
+    }
 }
 
 /// Pure helper: build a conversation prompt given an optional World ref and indices.
-/// Extracted from WorldNode so it can be unit-tested without a Godot runtime.
 fn build_prompt_for_pair(
     world: Option<&World>,
     i_idx: usize,
@@ -261,13 +296,12 @@ mod tests {
         let mut world = two_citizen_world();
         world.citizens[0].divine_awareness = 1.0;
         let prompt = build_prompt_for_pair(Some(&world), 0, 1, Some("gather wood")).unwrap();
-        assert!(prompt.contains("gather wood"), "divine voice should appear for aware citizen");
+        assert!(prompt.contains("gather wood"));
     }
 
     #[test]
     fn prompt_excludes_voice_content_for_unaware_initiator() {
-        // awareness=0: sensed placeholder injected but raw text must not appear
-        let world = two_citizen_world(); // divine_awareness = 0.0
+        let world = two_citizen_world();
         let prompt = build_prompt_for_pair(Some(&world), 0, 1, Some("gather wood")).unwrap();
         assert!(!prompt.contains("gather wood"), "raw text must not reach unaware citizen");
         assert!(prompt.contains("sensed"), "sensed placeholder should appear");
@@ -277,8 +311,8 @@ mod tests {
     fn prompt_contains_yaml_instruction() {
         let world = two_citizen_world();
         let prompt = build_prompt_for_pair(Some(&world), 0, 1, None).unwrap();
-        assert!(prompt.contains("speech"), "missing speech field");
-        assert!(prompt.contains("YAML"), "missing YAML format instruction");
-        assert!(prompt.contains("Japanese"), "missing Japanese language instruction");
+        assert!(prompt.contains("speech"));
+        assert!(prompt.contains("YAML"));
+        assert!(prompt.contains("Japanese"));
     }
 }

@@ -1,14 +1,16 @@
 use crate::agent::{
     behavior::{tick as behavior_tick, BehaviorAction, BehaviorState, Needs},
     citizen::{Citizen, Emotion},
-    conversation::{check_conversations, Position},
+    conversation::check_conversations,
 };
 use crate::llm::{
     provider::CitizenResponse,
     queue::{InferencePriority, InferenceQueue, InferenceRequest},
 };
+use crate::pathfinding::{step_citizen, MoveState, TilePos, WalkGrid};
 
-const CONVERSATION_PROXIMITY: f32 = 50.0;
+/// Maximum manhattan distance (tiles) for two citizens to start a conversation.
+const CONVERSATION_PROXIMITY_TILES: u32 = 4;
 const CONVERSATION_PROBABILITY: f32 = 0.5;
 /// Maximum number of entries kept in a citizen's memory_summary.
 const MEMORY_MAX_ENTRIES: usize = 8;
@@ -47,7 +49,8 @@ pub struct World {
     pub citizens: Vec<Citizen>,
     pub behavior_states: Vec<BehaviorState>,
     pub needs: Vec<CitizenNeeds>,
-    pub positions: Vec<Position>,
+    pub move_states: Vec<MoveState>,
+    pub walk_grid: Option<WalkGrid>,
     pub queue: InferenceQueue,
     pub tick_count: u64,
 }
@@ -58,7 +61,10 @@ impl World {
         Self {
             behavior_states: vec![BehaviorState::default(); n],
             needs: vec![CitizenNeeds::default(); n],
-            positions: vec![Position { x: 0.0, y: 0.0 }; n],
+            move_states: (0..n)
+                .map(|_| MoveState::new(TilePos::default(), TilePos::default(), 4))
+                .collect(),
+            walk_grid: None,
             queue: InferenceQueue::new(3),
             tick_count: 0,
             citizens,
@@ -86,22 +92,37 @@ impl World {
             }
         }
 
-        // Step 2: find conversation candidates (name + position + state tuples)
-        let citizen_tuples: Vec<(String, Position, BehaviorState)> = self
+        // Step 2: drive movement (only when walk_grid is set)
+        // Use take/replace to satisfy the borrow checker: &WalkGrid + &mut MoveState simultaneously.
+        if let Some(grid) = self.walk_grid.take() {
+            for (i, state) in self.move_states.iter_mut().enumerate() {
+                if self.behavior_states[i] == BehaviorState::Idle {
+                    let seed = self
+                        .tick_count
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(i as u64);
+                    step_citizen(state, &grid, seed);
+                }
+            }
+            self.walk_grid = Some(grid);
+        }
+
+        // Step 3: find conversation candidates
+        let citizen_tuples: Vec<(String, TilePos, BehaviorState)> = self
             .citizens
             .iter()
             .enumerate()
-            .map(|(i, c)| (c.name.clone(), self.positions[i], self.behavior_states[i]))
+            .map(|(i, c)| (c.name.clone(), self.move_states[i].tile_pos, self.behavior_states[i]))
             .collect();
 
         let requests = check_conversations(
             &citizen_tuples,
-            CONVERSATION_PROXIMITY,
+            CONVERSATION_PROXIMITY_TILES,
             CONVERSATION_PROBABILITY,
             random_roll,
         );
 
-        // Step 3: enqueue requests and collect pending conversations
+        // Step 4: enqueue requests and collect pending conversations
         let mut pending = Vec::new();
         for req in requests {
             let initiator_idx = self
@@ -136,15 +157,12 @@ impl World {
 ///
 /// Updates `emotion` and appends `speech` to `memory_summary`.
 pub fn apply_response(citizen: &mut Citizen, response: &CitizenResponse) {
-    // Map emotion_change string → Emotion enum
     citizen.emotion = parse_emotion(&response.emotion_change);
 
-    // Append speech to memory if non-empty, capped at MEMORY_MAX_ENTRIES
     if !response.speech.is_empty() {
         append_memory(&mut citizen.memory_summary, &response.speech, " | ", MEMORY_MAX_ENTRIES);
     }
 
-    // Log tech hints for future use
     if let Some(hint) = &response.tech_hint {
         eprintln!("[tech_hint] {}: {hint}", citizen.name);
     }
@@ -159,7 +177,6 @@ pub fn append_memory(summary: &mut String, entry: &str, sep: &str, max_entries: 
     }
     summary.push_str(sep);
     summary.push_str(entry);
-    // Trim to max_entries
     let entries: Vec<&str> = summary.split(sep).collect();
     if entries.len() > max_entries {
         *summary = entries[entries.len() - max_entries..].join(sep);
@@ -192,36 +209,44 @@ mod tests {
         }
     }
 
-    fn make_world_with_positions(names: &[&str], positions: Vec<Position>) -> World {
+    /// Build a world with citizens placed at the given tile positions.
+    fn make_world_with_tiles(names: &[&str], tiles: Vec<TilePos>) -> World {
         let citizens: Vec<Citizen> = names.iter().map(|n| make_citizen(n)).collect();
         let mut world = World::new(citizens);
-        world.positions = positions;
+        for (i, pos) in tiles.into_iter().enumerate() {
+            if let Some(s) = world.move_states.get_mut(i) {
+                s.tile_pos = pos;
+                s.wander_center = pos;
+            }
+        }
         world
     }
 
-    fn close_positions(n: usize) -> Vec<Position> {
-        (0..n).map(|i| Position { x: i as f32 * 5.0, y: 0.0 }).collect()
+    /// Citizens within CONVERSATION_PROXIMITY_TILES of each other.
+    fn close_tiles(n: usize) -> Vec<TilePos> {
+        (0..n).map(|i| TilePos::new(i as i16 * 2, 0)).collect()
     }
 
-    fn spread_positions(n: usize) -> Vec<Position> {
-        (0..n).map(|i| Position { x: i as f32 * 200.0, y: 0.0 }).collect()
+    /// Citizens spread far apart (> CONVERSATION_PROXIMITY_TILES).
+    fn spread_tiles(n: usize) -> Vec<TilePos> {
+        (0..n).map(|i| TilePos::new(i as i16 * 20, 0)).collect()
     }
 
     // --- tick: behavior state ---
 
     #[test]
     fn tick_advances_behavior_states_to_sleep_when_fatigued() {
-        let mut world = make_world_with_positions(&["A"], vec![Position { x: 0.0, y: 0.0 }]);
+        let mut world = make_world_with_tiles(&["A"], vec![TilePos::new(0, 0)]);
         world.needs[0].fatigue = 0.9;
 
-        world.tick(0.0); // random_roll=0.0 so conversations can fire, but only 1 citizen
+        world.tick(0.0);
 
         assert_eq!(world.behavior_states[0], BehaviorState::Sleeping);
     }
 
     #[test]
     fn tick_increments_tick_count() {
-        let mut world = make_world_with_positions(&["A"], vec![Position { x: 0.0, y: 0.0 }]);
+        let mut world = make_world_with_tiles(&["A"], vec![TilePos::new(0, 0)]);
         assert_eq!(world.tick_count, 0);
         world.tick(1.0);
         assert_eq!(world.tick_count, 1);
@@ -233,9 +258,7 @@ mod tests {
 
     #[test]
     fn tick_returns_pending_for_idle_close_pair() {
-        let mut world =
-            make_world_with_positions(&["Kael", "Elder"], close_positions(2));
-        // random_roll=0.0 < probability=0.5 → conversation fires
+        let mut world = make_world_with_tiles(&["Kael", "Elder"], close_tiles(2));
         let pending = world.tick(0.0);
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].initiator_idx, 0);
@@ -244,11 +267,9 @@ mod tests {
 
     #[test]
     fn tick_no_pending_when_all_sleeping() {
-        let mut world =
-            make_world_with_positions(&["A", "B"], close_positions(2));
+        let mut world = make_world_with_tiles(&["A", "B"], close_tiles(2));
         world.behavior_states[0] = BehaviorState::Sleeping;
         world.behavior_states[1] = BehaviorState::Sleeping;
-        // fatigue=0.5 keeps them asleep (wake threshold is 0.1)
         world.needs[0].fatigue = 0.5;
         world.needs[1].fatigue = 0.5;
 
@@ -258,25 +279,21 @@ mod tests {
 
     #[test]
     fn tick_no_pending_when_citizens_far_apart() {
-        let mut world =
-            make_world_with_positions(&["A", "B"], spread_positions(2));
+        let mut world = make_world_with_tiles(&["A", "B"], spread_tiles(2));
         let pending = world.tick(0.0);
         assert!(pending.is_empty());
     }
 
     #[test]
     fn tick_no_pending_when_roll_exceeds_probability() {
-        let mut world =
-            make_world_with_positions(&["A", "B"], close_positions(2));
-        // random_roll=1.0 ≥ probability=0.5 → no conversation
+        let mut world = make_world_with_tiles(&["A", "B"], close_tiles(2));
         let pending = world.tick(1.0);
         assert!(pending.is_empty());
     }
 
     #[test]
     fn tick_enqueues_request_to_queue() {
-        let mut world =
-            make_world_with_positions(&["A", "B"], close_positions(2));
+        let mut world = make_world_with_tiles(&["A", "B"], close_tiles(2));
         assert!(world.queue.is_empty());
         world.tick(0.0);
         assert!(!world.queue.is_empty());
@@ -364,7 +381,7 @@ mod tests {
         }
         let entries: Vec<&str> = summary.split(" | ").collect();
         assert_eq!(entries.len(), 8);
-        assert_eq!(entries[0], "entry2"); // oldest kept is entry2
+        assert_eq!(entries[0], "entry2");
         assert_eq!(entries[7], "entry9");
     }
 

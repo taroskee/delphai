@@ -4,4 +4,4 @@ pub mod conversation;
 
 pub use behavior::{BehaviorAction, BehaviorState, Needs};
 pub use citizen::{Citizen, Emotion, Relationship};
-pub use conversation::{check_conversations, ConversationRequest, Position};
+pub use conversation::{check_conversations, ConversationRequest};

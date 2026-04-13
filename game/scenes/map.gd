@@ -58,6 +58,17 @@ func _ready() -> void:
 	_build_tilemap()
 	_scatter_trees()
 
+## Return a flat PackedByteArray (row-major) where 1=walkable, 0=blocked.
+## Water tiles (W) are blocked; grass, dirt, and bridge are walkable.
+func get_walkable_data() -> PackedByteArray:
+	var data := PackedByteArray()
+	data.resize(MAP_COLS * MAP_ROWS)
+	for row in range(MAP_ROWS):
+		for col in range(MAP_COLS):
+			var cell_type: int = MAP_LAYOUT[row][col]
+			data[row * MAP_COLS + col] = 0 if cell_type == W else 1
+	return data
+
 # ---------------------------------------------------------------------------
 # TileMap ground layer
 # ---------------------------------------------------------------------------

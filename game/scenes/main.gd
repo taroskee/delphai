@@ -8,15 +8,15 @@ const MapScript = preload("res://scenes/map.gd")
 
 # Character sprite paths (must have emotion frames: shake/nod/surprise/laugh)
 const CITIZEN_CHAR_PATHS: Array = ["chara/chara2_1", "chara/chara3_1", "chara/chara4_1"]
-# Positions around the campfire (1152 x 648 layout)
-const CITIZEN_POSITIONS: Array = [
-	Vector2(340, 410),   # Kael  — left
-	Vector2(576, 440),   # Elder — center, slightly forward
-	Vector2(820, 410),   # Hara  — right
-]
+
+# Tile grid constants — must match map.gd
+const TILE_PX    := 16
+const TILE_SCALE := 3
 
 var _world_sim
+var _map: Node2D = null
 var _citizen_sprites: Array = []
+var _prev_tile_positions: Array = []  # Array of Vector2i — last known tile pos per citizen
 var _conv_log: RichTextLabel
 var _log_scroll: ScrollContainer
 var _voice_input: LineEdit
@@ -33,7 +33,7 @@ func _ready() -> void:
 	_build_world()
 	_build_scene()
 	_build_ui()
-	_log_message("=== 焚き火デモ 起動 ===")
+	_log_message("=== ワールドデモ 起動 ===")
 	_update_citizen_panels()
 
 # ---------------------------------------------------------------------------
@@ -67,10 +67,11 @@ func _build_scene() -> void:
 	_build_map()
 	_build_fire()
 	_build_citizen_sprites()
+	_init_walkable_map()
 
 func _build_map() -> void:
-	var map := MapScript.new()
-	add_child(map)
+	_map = MapScript.new()
+	add_child(_map)
 
 func _build_fire() -> void:
 	var fire_sprite := AnimatedSprite2D.new()
@@ -106,9 +107,29 @@ func _build_citizen_sprites() -> void:
 
 		var sprite_node := CitizenSpriteScript.new()
 		add_child(sprite_node)
-		sprite_node.position = CITIZEN_POSITIONS[i] if i < CITIZEN_POSITIONS.size() else Vector2(576, 420)
+
+		# Position at the citizen's initial tile
+		var tile: Vector2i = _world_sim.get_citizen_tile_pos(i)
+		sprite_node.position = _tile_to_screen(tile)
 		sprite_node.setup(cname, char_path)
 		_citizen_sprites.append(sprite_node)
+		_prev_tile_positions.append(tile)
+
+## Upload the walkability map to Rust after the TileMap is ready.
+func _init_walkable_map() -> void:
+	if not _world_sim or not _map:
+		return
+	if not _map.has_method("get_walkable_data"):
+		push_warning("[main.gd] map.gd missing get_walkable_data()")
+		return
+	var data: PackedByteArray = _map.get_walkable_data()
+	_world_sim.set_walkable_map(data, 24, 14)  # MAP_COLS=24, MAP_ROWS=14
+
+## Convert tile grid coordinates to world screen position (center of tile).
+func _tile_to_screen(tile: Vector2i) -> Vector2:
+	var x := (tile.x * TILE_PX + TILE_PX / 2) * TILE_SCALE
+	var y := (tile.y * TILE_PX + TILE_PX / 2) * TILE_SCALE
+	return Vector2(x, y)
 
 # ---------------------------------------------------------------------------
 # UI: log panel + voice input (CanvasLayer overlay)
@@ -174,7 +195,23 @@ func _on_timer_timeout() -> void:
 		])
 		_llm_queue.append(p)
 	_process_llm_queue()
+	_update_sprite_positions()
 	_update_citizen_panels()
+
+## Move citizen sprites to match their new tile positions returned by Rust.
+func _update_sprite_positions() -> void:
+	if not _world_sim:
+		return
+	var count: int = _world_sim.get_citizen_count()
+	for i in range(count):
+		if i >= _citizen_sprites.size():
+			break
+		var tile: Vector2i = _world_sim.get_citizen_tile_pos(i)
+		if tile != _prev_tile_positions[i]:
+			_prev_tile_positions[i] = tile
+			var dir: int = _world_sim.get_citizen_facing(i)
+			_citizen_sprites[i].set_facing(dir)
+			_citizen_sprites[i].walk_to(_tile_to_screen(tile))
 
 # ---------------------------------------------------------------------------
 # LLM pipeline
@@ -194,7 +231,6 @@ func _call_ollama_for_pair(i_idx: int, p_idx: int) -> void:
 		var i_name: String = _world_sim.get_citizen_name(i_idx)
 		_log_message("[デバッグ] %s のプロンプト構築失敗（メソッド未登録の可能性）" % i_name)
 		return
-	# Clear divine voice after baking it into this prompt
 	_world_sim.clear_divine_voice()
 	var i_name: String = _world_sim.get_citizen_name(i_idx)
 	var p_name: String = _world_sim.get_citizen_name(p_idx)
@@ -254,7 +290,6 @@ func _on_http_completed(
 		_world_sim.apply_citizen_response(i_idx, speech, emotion)
 		_log_message("[%s] %s" % [i_name, speech])
 
-		# Update sprite: speech bubble + reaction animation
 		if i_idx < _citizen_sprites.size():
 			var awareness: float = _world_sim.get_divine_awareness(i_idx)
 			_citizen_sprites[i_idx].show_speech(speech)
@@ -262,7 +297,6 @@ func _on_http_completed(
 
 		_update_citizen_panels()
 
-		# Queue partner's reply (once only)
 		if not _current_pair.get("is_reply", false):
 			var p_idx: int = _current_pair.get("partner_idx", 1)
 			if _world_sim:
@@ -290,7 +324,6 @@ func _on_voice_pressed() -> void:
 
 	_world_sim.set_divine_voice(text)
 
-	# Grow awareness for all citizens, play skeptical reaction on first encounter
 	var count: int = _world_sim.get_citizen_count()
 	for i in range(count):
 		_world_sim.grow_divine_awareness(i, 0.07)
@@ -301,7 +334,6 @@ func _on_voice_pressed() -> void:
 		if i < _citizen_sprites.size():
 			_citizen_sprites[i].play_reaction(awareness)
 
-	# Queue a divine voice reaction from Kael (citizen 0)
 	_llm_queue.append({"initiator_idx": 0, "partner_idx": 1})
 	_process_llm_queue()
 
@@ -320,8 +352,6 @@ func _update_citizen_panels() -> void:
 		_citizen_sprites[i].set_emotion_label(emotion)
 
 ## Extract a single-line YAML field value.
-## Handles `field: foo bar`, `field: "foo bar"`, and `field: 'foo bar'`.
-## Does NOT support YAML block scalars (| / >) — returns empty for those.
 func _extract_yaml_field(text: String, field: String) -> String:
 	for line in text.split("\n"):
 		var stripped := line.strip_edges()

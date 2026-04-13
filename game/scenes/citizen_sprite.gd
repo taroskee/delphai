@@ -151,6 +151,25 @@ func set_emotion_label(emotion: String) -> void:
 	if _emotion_label:
 		_emotion_label.text = emotion
 
+## Tween-interpolate this node to screen_pos over one step duration.
+## Plays "breathe" while moving; returns to "breathe" (looping) on arrival.
+func walk_to(screen_pos: Vector2) -> void:
+	var tween := create_tween()
+	tween.tween_property(self, "position", screen_pos, 0.12)
+
+## Update sprite facing based on Rust pathfinding direction.
+## dir: 0=down  1=left  2=right  3=up
+func set_facing(dir: int) -> void:
+	if not _sprite:
+		return
+	match dir:
+		1:  # left — flip sprite horizontally
+			_sprite.flip_h = true
+		2:  # right — reset flip
+			_sprite.flip_h = false
+		_:  # up/down — keep current flip, only h-flip matters with this spritesheet
+			pass
+
 # ---------------------------------------------------------------------------
 # Private
 # ---------------------------------------------------------------------------
