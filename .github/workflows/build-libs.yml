@@ -9,6 +9,11 @@ on:
       - 'Cargo.lock'
       - '.github/workflows/build-libs.yml'
   workflow_dispatch:
+    inputs:
+      build_release:
+        description: 'Build release dylib (slow, only needed for shipping)'
+        type: boolean
+        default: false
 
 jobs:
   build-macos:
@@ -17,13 +22,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -39,13 +44,17 @@ jobs:
         run: cargo build -p delphai-gdext
 
       - name: Build release dylib
+        if: github.event_name == 'workflow_dispatch' && inputs.build_release
         run: cargo build -p delphai-gdext --release
 
       - name: Copy to prebuilt/
         run: |
-          mkdir -p prebuilt/macos/debug prebuilt/macos/release
+          mkdir -p prebuilt/macos/debug
           cp target/debug/libdelphai_gdext.dylib prebuilt/macos/debug/
-          cp target/release/libdelphai_gdext.dylib prebuilt/macos/release/
+          if [ -f target/release/libdelphai_gdext.dylib ]; then
+            mkdir -p prebuilt/macos/release
+            cp target/release/libdelphai_gdext.dylib prebuilt/macos/release/
+          fi
 
       - name: Commit prebuilt dylibs
         run: |
