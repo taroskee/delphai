@@ -6,6 +6,14 @@
 **/assets/**
 **/__pycache__
 
+# Claude Code local data (plans, memory — developer-specific)
+.claude/
+
+# Stray image files at repo root
+/*.png
+/*.jpg
+/*.jpeg
+
 # Allow prebuilt native libraries (built by CI)
 !prebuilt/**/*.dylib
 !prebuilt/**/*.so
