@@ -23,6 +23,12 @@ var _gather_time: float       = 0.0
 # Tech UI
 var _tech_bar: ProgressBar    = null
 var _tech_lbl: Label          = null   # "Stone Tools  12 / 50"
+var _prev_tech_name: String   = ""     # detect unlock transitions
+var _notify_lbl: Label        = null   # unlock banner
+var _notify_timer: float      = 0.0   # seconds remaining for banner
+
+# Debug UI container (for dynamically adding citizen rows)
+var _debug_panel: VBoxContainer = null
 
 # Camera rig
 var _cam: Camera3D            = null
@@ -50,7 +56,9 @@ func _ready() -> void:
 	_build_citizens()
 	_build_debug_ui()
 	_build_tech_ui()
+	_build_notify_label()
 	_build_bgm()
+	_prev_tech_name = _world_sim.get_next_tech_name()
 
 func _input(event: InputEvent) -> void:
 	if _cam == null:
@@ -80,9 +88,18 @@ func _process(delta: float) -> void:
 		_tick_acc -= 1.0 / TICK_RATE
 		_world_sim.tick(randf())
 		_update_citizens()
+		_check_births()
 
 	_gather_time += delta
 	_animate_gathering()
+
+	# Fade notify banner
+	if _notify_timer > 0.0:
+		_notify_timer -= delta
+		var alpha := clampf(_notify_timer / 0.8, 0.0, 1.0)
+		_notify_lbl.modulate.a = alpha
+		if _notify_timer <= 0.0:
+			_notify_lbl.visible = false
 
 # ── Coordinate helpers ────────────────────────────────────────────────────────
 
@@ -275,44 +292,68 @@ func _build_debug_ui() -> void:
 	layer.name = "DebugUI"
 	add_child(layer)
 
-	var panel := VBoxContainer.new()
-	panel.name = "CitizenPanel"
-	panel.position = Vector2(10.0, 10.0)
-	layer.add_child(panel)
+	_debug_panel = VBoxContainer.new()
+	_debug_panel.name = "CitizenPanel"
+	_debug_panel.position = Vector2(10.0, 10.0)
+	layer.add_child(_debug_panel)
 
 	var count := _world_sim.get_citizen_count()
 	for i in range(count):
-		var cname: String = _world_sim.get_citizen_name(i)
-		var row := HBoxContainer.new()
-		row.add_theme_constant_override("separation", 6)
-		panel.add_child(row)
+		_add_debug_row(_world_sim.get_citizen_name(i))
 
-		var lbl := Label.new()
-		lbl.text = cname
-		lbl.custom_minimum_size = Vector2(64, 0)
-		row.add_child(lbl)
+func _add_debug_row(cname: String) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	_debug_panel.add_child(row)
 
-		# Food bar (orange)
-		var fed_bar := ProgressBar.new()
-		fed_bar.min_value = 0.0
-		fed_bar.max_value = 1.0
-		fed_bar.value     = 1.0
-		fed_bar.custom_minimum_size = Vector2(80, 18)
-		fed_bar.modulate  = Color(1.0, 0.55, 0.1)
-		fed_bar.show_percentage = false
-		row.add_child(fed_bar)
-		_fed_bars.append(fed_bar)
+	var lbl := Label.new()
+	lbl.text = cname
+	lbl.custom_minimum_size = Vector2(64, 0)
+	row.add_child(lbl)
 
-		# Water bar (blue)
-		var hyd_bar := ProgressBar.new()
-		hyd_bar.min_value = 0.0
-		hyd_bar.max_value = 1.0
-		hyd_bar.value     = 1.0
-		hyd_bar.custom_minimum_size = Vector2(80, 18)
-		hyd_bar.modulate  = Color(0.3, 0.6, 1.0)
-		hyd_bar.show_percentage = false
-		row.add_child(hyd_bar)
-		_hyd_bars.append(hyd_bar)
+	var fed_bar := ProgressBar.new()
+	fed_bar.min_value = 0.0
+	fed_bar.max_value = 1.0
+	fed_bar.value     = 1.0
+	fed_bar.custom_minimum_size = Vector2(80, 18)
+	fed_bar.modulate  = Color(1.0, 0.55, 0.1)
+	fed_bar.show_percentage = false
+	row.add_child(fed_bar)
+	_fed_bars.append(fed_bar)
+
+	var hyd_bar := ProgressBar.new()
+	hyd_bar.min_value = 0.0
+	hyd_bar.max_value = 1.0
+	hyd_bar.value     = 1.0
+	hyd_bar.custom_minimum_size = Vector2(80, 18)
+	hyd_bar.modulate  = Color(0.3, 0.6, 1.0)
+	hyd_bar.show_percentage = false
+	row.add_child(hyd_bar)
+	_hyd_bars.append(hyd_bar)
+
+func _build_notify_label() -> void:
+	var layer := CanvasLayer.new()
+	layer.name = "NotifyLayer"
+	add_child(layer)
+
+	_notify_lbl = Label.new()
+	_notify_lbl.name = "NotifyLabel"
+	_notify_lbl.text = ""
+	_notify_lbl.add_theme_font_size_override("font_size", 28)
+	_notify_lbl.add_theme_color_override("font_color", Color(1.0, 0.9, 0.3))
+	# Center horizontally near top
+	_notify_lbl.set_anchor_and_offset(SIDE_LEFT,   0.5, -200.0)
+	_notify_lbl.set_anchor_and_offset(SIDE_RIGHT,  0.5,  200.0)
+	_notify_lbl.set_anchor_and_offset(SIDE_TOP,    0.0,   60.0)
+	_notify_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_notify_lbl.visible = false
+	layer.add_child(_notify_lbl)
+
+func _show_notify(msg: String) -> void:
+	_notify_lbl.text = msg
+	_notify_lbl.modulate.a = 1.0
+	_notify_lbl.visible = true
+	_notify_timer = 3.5
 
 func _build_tech_ui() -> void:
 	var layer := CanvasLayer.new()
@@ -387,17 +428,39 @@ func _update_day_night() -> void:
 	var noon := 1.0 - absf(progress - 0.22) * 5.0
 	_sun.light_energy = lerpf(0.05, 1.4, clampf(noon, 0.0, 1.0))
 
+func _check_births() -> void:
+	while _world_sim.pop_citizen_birth():
+		var idx := _citizen_nodes.size()
+		var cname: String = _world_sim.get_citizen_name(idx)
+		var citizens_container := get_node_or_null("Citizens")
+		if citizens_container == null:
+			break
+		var node := _make_citizen(cname, idx)
+		citizens_container.add_child(node)
+		_citizen_nodes.append(node)
+		_citizen_behaviors.append("idle")
+		_sync_citizen_pos(idx)
+		_add_debug_row(cname)
+		_show_notify("New citizen born: " + cname + "!")
+
 func _update_tech_ui() -> void:
 	if _tech_lbl == null or _tech_bar == null:
 		return
-	var pts: int    = _world_sim.get_research_points()
-	var name: String = _world_sim.get_next_tech_name()
-	var req: int    = _world_sim.get_next_tech_required()
-	if name == "":
+	var pts: int     = _world_sim.get_research_points()
+	var tech_name: String = _world_sim.get_next_tech_name()
+	var req: int     = _world_sim.get_next_tech_required()
+
+	# Detect unlock: previous name was non-empty and is now gone or different
+	if _prev_tech_name != "" and tech_name != _prev_tech_name:
+		var unlocked_name := _prev_tech_name.replace("_", " ").capitalize()
+		_show_notify("Tech unlocked: " + unlocked_name + "!")
+	_prev_tech_name = tech_name
+
+	if tech_name == "":
 		_tech_lbl.text  = "All techs unlocked!"
 		_tech_bar.value = 1.0
 	else:
-		_tech_lbl.text  = "%s  %d / %d" % [name.replace("_", " ").capitalize(), pts, req]
+		_tech_lbl.text  = "%s  %d / %d" % [tech_name.replace("_", " ").capitalize(), pts, req]
 		_tech_bar.max_value = float(req) if req > 0 else 1.0
 		_tech_bar.value     = float(pts)
 

@@ -4,7 +4,7 @@ use crate::agent::{
 };
 use crate::llm::provider::CitizenResponse;
 use crate::pathfinding::{step_citizen, MoveState, TilePos, WalkGrid};
-use crate::resource::{Resource, ResourceKind};
+use crate::resource::{Resource, ResourceKind, BERRY_BUSH_RESPAWN_TICKS};
 use crate::tech::TechTree;
 
 /// Maximum number of entries kept in a citizen's memory_summary.
@@ -33,6 +33,19 @@ const FED_DECAY_PER_TICK: f32 = 0.004;
 const HYDRATION_DECAY_PER_TICK: f32 = 0.007;
 const GATHER_RATE: f32 = 0.05;
 const DRINK_RATE: f32 = 0.08;
+const MAX_CITIZENS: usize = 8;
+/// All citizens must have fed > this AND hydration > this to accumulate prosperity.
+const PROSPERITY_VITALS_THRESHOLD: f32 = 0.8;
+/// Prosperity ticks needed before a new citizen is born.
+const BIRTH_THRESHOLD: u32 = 200;
+
+/// Spawn position for new citizens (roughly map center on a 24×14 grid).
+const BIRTH_TILE: TilePos = TilePos { x: 12, y: 7 };
+
+/// Names assigned to born citizens (cycles through the pool).
+const CITIZEN_NAMES: &[&str] = &[
+    "Rael", "Mira", "Thorn", "Sola", "Garan", "Lysa", "Brek", "Asha",
+];
 
 /// Holds all mutable world state. `tick()` advances one game turn.
 pub struct World {
@@ -44,6 +57,10 @@ pub struct World {
     pub resources: Vec<Resource>,
     pub tech_tree: TechTree,
     pub tick_count: u64,
+    /// Accumulated ticks where all citizens are well-fed and hydrated.
+    pub prosperity_ticks: u32,
+    /// Number of citizens born since last polled by GDScript.
+    pub pending_births: u32,
 }
 
 impl World {
@@ -59,17 +76,64 @@ impl World {
             resources: Vec::new(),
             tech_tree: TechTree::new(),
             tick_count: 0,
+            prosperity_ticks: 0,
+            pending_births: 0,
             citizens,
         }
     }
 
-    /// Effective gather rate — 1.5× after stone tools unlock.
+    /// Effective gather rate:
+    ///   base → × 1.5 after stone_tools (id=0) → × 2.0 after bronze_tools (id=2).
     fn effective_gather_rate(&self) -> f32 {
-        if self.tech_tree.is_unlocked(0) {
+        if self.tech_tree.is_unlocked(2) {
+            GATHER_RATE * 2.0
+        } else if self.tech_tree.is_unlocked(0) {
             GATHER_RATE * 1.5
         } else {
             GATHER_RATE
         }
+    }
+
+    /// Effective berry bush respawn ticks: halved after agriculture (id=1).
+    fn effective_respawn_ticks(&self) -> u32 {
+        if self.tech_tree.is_unlocked(1) {
+            BERRY_BUSH_RESPAWN_TICKS / 3
+        } else {
+            BERRY_BUSH_RESPAWN_TICKS
+        }
+    }
+
+    /// Attempt to spawn a new citizen when the tribe is thriving.
+    fn maybe_spawn_citizen(&mut self) {
+        let all_thriving = self.vitals.iter().all(|v| {
+            v.fed > PROSPERITY_VITALS_THRESHOLD && v.hydration > PROSPERITY_VITALS_THRESHOLD
+        });
+        if all_thriving && self.citizens.len() < MAX_CITIZENS {
+            self.prosperity_ticks += 1;
+            if self.prosperity_ticks >= BIRTH_THRESHOLD {
+                self.prosperity_ticks = 0;
+                self.birth_citizen();
+            }
+        } else {
+            self.prosperity_ticks = 0;
+        }
+    }
+
+    fn birth_citizen(&mut self) {
+        let name = CITIZEN_NAMES[self.citizens.len() % CITIZEN_NAMES.len()].to_string();
+        let citizen = Citizen {
+            name,
+            personality_tags: vec![],
+            memory_summary: String::new(),
+            emotion: Emotion::Happy,
+            relationships: vec![],
+            divine_awareness: 0.0,
+        };
+        self.citizens.push(citizen);
+        self.behavior_states.push(BehaviorState::default());
+        self.vitals.push(CitizenVitals::default());
+        self.move_states.push(MoveState::new(BIRTH_TILE, BIRTH_TILE, 4));
+        self.pending_births += 1;
     }
 
     pub fn add_resource(&mut self, r: Resource) {
@@ -120,11 +184,12 @@ impl World {
                 BehaviorState::Gathering => {
                     let pos = self.move_states[i].tile_pos;
                     let rate = self.effective_gather_rate();
+                    let respawn_ticks = self.effective_respawn_ticks();
                     let mut gathered = 0.0_f32;
                     for r in &mut self.resources {
                         if r.kind == ResourceKind::BerryBush && r.pos == pos && r.is_available() {
                             let take = rate.min(r.quantity);
-                            r.deplete(take);
+                            r.deplete_with_respawn(take, respawn_ticks);
                             gathered = take;
                             break;
                         }
@@ -199,6 +264,9 @@ impl World {
             }
             self.walk_grid = Some(grid);
         }
+
+        // Step 5: population growth when the tribe is thriving.
+        self.maybe_spawn_citizen();
     }
 }
 

@@ -67,6 +67,7 @@ impl WorldNode {
         // Seed some resources — positions adjusted when real map is available.
         world.add_resource(Resource::berry_bush(TilePos::new(5, 5)));
         world.add_resource(Resource::berry_bush(TilePos::new(15, 10)));
+        world.add_resource(Resource::berry_bush(TilePos::new(10, 2)));
         world.add_resource(Resource::water_source(TilePos::new(20, 3)));
 
         self.world = Some(world);
@@ -228,6 +229,23 @@ impl WorldNode {
             .as_ref()
             .and_then(|w| w.tech_tree.next_required_points())
             .unwrap_or(0) as i64
+    }
+
+    // -------------------------------------------------------------------------
+    // Population
+    // -------------------------------------------------------------------------
+
+    /// Returns true (and clears the flag) if a citizen was born since the last call.
+    /// GDScript should call this each tick and add a node when it returns true.
+    #[func]
+    fn pop_citizen_birth(&mut self) -> bool {
+        if let Some(world) = &mut self.world {
+            if world.pending_births > 0 {
+                world.pending_births -= 1;
+                return true;
+            }
+        }
+        false
     }
 
     // -------------------------------------------------------------------------

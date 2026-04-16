@@ -28,7 +28,11 @@ pub struct TechTree {
 impl TechTree {
     pub fn new() -> Self {
         Self {
-            nodes: vec![TechNode::new(0, "stone_tools", 50)],
+            nodes: vec![
+                TechNode::new(0, "stone_tools", 50),
+                TechNode::new(1, "agriculture", 200),
+                TechNode::new(2, "bronze_tools", 500),
+            ],
             research_points: 0,
         }
     }
@@ -40,15 +44,17 @@ impl TechTree {
         self.try_unlock()
     }
 
-    /// Unlock the first locked node whose threshold is reached.
+    /// Unlock all locked nodes whose threshold is now reached (in order).
+    /// Returns the id of the last newly-unlocked tech, or None if nothing changed.
     fn try_unlock(&mut self) -> Option<TechNodeId> {
+        let mut last = None;
         for node in &mut self.nodes {
             if !node.unlocked && self.research_points >= node.required_points {
                 node.unlocked = true;
-                return Some(node.id);
+                last = Some(node.id);
             }
         }
-        None
+        last
     }
 
     pub fn is_unlocked(&self, id: TechNodeId) -> bool {
@@ -110,7 +116,25 @@ mod tests {
     #[test]
     fn next_tech_name_is_none_when_all_unlocked() {
         let mut tree = TechTree::new();
-        tree.add_points(50);
+        tree.add_points(500); // enough to unlock all three techs
         assert!(tree.next_tech_name().is_none());
+    }
+
+    #[test]
+    fn second_tech_agriculture_unlocks_at_200() {
+        let mut tree = TechTree::new();
+        tree.add_points(199);
+        assert!(tree.next_tech_name() == Some("agriculture"));
+        tree.add_points(1);
+        assert!(tree.is_unlocked(1));
+    }
+
+    #[test]
+    fn bronze_tools_unlocks_at_500() {
+        let mut tree = TechTree::new();
+        tree.add_points(499);
+        assert!(!tree.is_unlocked(2));
+        tree.add_points(1);
+        assert!(tree.is_unlocked(2));
     }
 }

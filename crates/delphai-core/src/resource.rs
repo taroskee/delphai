@@ -24,7 +24,7 @@ pub struct Resource {
 }
 
 const BERRY_BUSH_MAX_QUANTITY: f32 = 1.0;
-const BERRY_BUSH_RESPAWN_TICKS: u32 = 200;
+pub const BERRY_BUSH_RESPAWN_TICKS: u32 = 200;
 
 impl Resource {
     pub fn berry_bush(pos: TilePos) -> Self {
@@ -66,12 +66,17 @@ impl Resource {
 
     /// Deplete `amount` from this resource. Starts respawn timer when exhausted.
     pub fn deplete(&mut self, amount: f32) {
+        self.deplete_with_respawn(amount, BERRY_BUSH_RESPAWN_TICKS);
+    }
+
+    /// Deplete `amount` with a custom respawn timer (allows tech effects to speed up regrowth).
+    pub fn deplete_with_respawn(&mut self, amount: f32, respawn_ticks: u32) {
         if self.kind == ResourceKind::WaterSource {
             return;
         }
         self.quantity = (self.quantity - amount).max(0.0);
         if self.quantity <= 0.0 {
-            self.respawn_timer = BERRY_BUSH_RESPAWN_TICKS;
+            self.respawn_timer = respawn_ticks;
         }
     }
 }
