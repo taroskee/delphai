@@ -8,8 +8,13 @@ const MAP_HEIGHT := 14
 const TICK_RATE  := 4.0   # ticks per second
 
 var _world_sim: WorldNode
-var _citizen_nodes: Array = []
-var _tick_acc: float = 0.0
+var _citizen_nodes: Array    = []
+var _citizen_behaviors: Array = []  # cached behavior string per citizen
+var _resource_meshes: Array  = []   # MeshInstance3D per resource (for scale updates)
+var _fed_bars: Array         = []
+var _hyd_bars: Array         = []
+var _tick_acc: float         = 0.0
+var _gather_time: float      = 0.0
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
@@ -26,6 +31,7 @@ func _ready() -> void:
 	_send_walkable_map()
 	_build_resources()
 	_build_citizens()
+	_build_debug_ui()
 
 func _process(delta: float) -> void:
 	_tick_acc += delta
@@ -33,6 +39,9 @@ func _process(delta: float) -> void:
 		_tick_acc -= 1.0 / TICK_RATE
 		_world_sim.tick(randf())
 		_update_citizens()
+
+	_gather_time += delta
+	_animate_gathering()
 
 # ── Coordinate helpers ────────────────────────────────────────────────────────
 
@@ -109,7 +118,9 @@ func _build_resources() -> void:
 	for i in range(count):
 		var tile: Vector2i = _world_sim.get_resource_pos(i)
 		var kind: String   = _world_sim.get_resource_kind(i)
-		container.add_child(_make_resource(kind, tile.x, tile.y))
+		var rnode := _make_resource(kind, tile.x, tile.y)
+		container.add_child(rnode)
+		_resource_meshes.append(rnode.get_meta("mesh_inst"))
 
 func _make_resource(kind: String, col: int, row: int) -> Node3D:
 	var root := Node3D.new()
@@ -135,6 +146,8 @@ func _make_resource(kind: String, col: int, row: int) -> Node3D:
 
 	mesh_inst.material_override = mat
 	root.add_child(mesh_inst)
+	root.set_meta("mesh_inst", mesh_inst)
+	root.set_meta("kind", kind)
 	return root
 
 func _build_citizens() -> void:
@@ -147,6 +160,7 @@ func _build_citizens() -> void:
 		var node := _make_citizen(cname, i)
 		container.add_child(node)
 		_citizen_nodes.append(node)
+		_citizen_behaviors.append("idle")
 		_sync_citizen_pos(i)
 
 func _make_citizen(cname: String, idx: int) -> CharacterBody3D:
@@ -195,6 +209,50 @@ func _make_citizen(cname: String, idx: int) -> CharacterBody3D:
 
 	return body
 
+func _build_debug_ui() -> void:
+	var layer := CanvasLayer.new()
+	layer.name = "DebugUI"
+	add_child(layer)
+
+	var panel := VBoxContainer.new()
+	panel.name = "CitizenPanel"
+	panel.position = Vector2(10.0, 10.0)
+	layer.add_child(panel)
+
+	var count := _world_sim.get_citizen_count()
+	for i in range(count):
+		var cname: String = _world_sim.get_citizen_name(i)
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		panel.add_child(row)
+
+		var lbl := Label.new()
+		lbl.text = cname
+		lbl.custom_minimum_size = Vector2(64, 0)
+		row.add_child(lbl)
+
+		# Food bar (orange)
+		var fed_bar := ProgressBar.new()
+		fed_bar.min_value = 0.0
+		fed_bar.max_value = 1.0
+		fed_bar.value     = 1.0
+		fed_bar.custom_minimum_size = Vector2(80, 18)
+		fed_bar.modulate  = Color(1.0, 0.55, 0.1)
+		fed_bar.show_percentage = false
+		row.add_child(fed_bar)
+		_fed_bars.append(fed_bar)
+
+		# Water bar (blue)
+		var hyd_bar := ProgressBar.new()
+		hyd_bar.min_value = 0.0
+		hyd_bar.max_value = 1.0
+		hyd_bar.value     = 1.0
+		hyd_bar.custom_minimum_size = Vector2(80, 18)
+		hyd_bar.modulate  = Color(0.3, 0.6, 1.0)
+		hyd_bar.show_percentage = false
+		row.add_child(hyd_bar)
+		_hyd_bars.append(hyd_bar)
+
 # ── Per-tick updates ──────────────────────────────────────────────────────────
 
 func _sync_citizen_pos(idx: int) -> void:
@@ -208,6 +266,8 @@ func _update_citizens() -> void:
 		var fed: float   = _world_sim.get_citizen_fed(i)
 		var hyd: float   = _world_sim.get_citizen_hydration(i)
 
+		_citizen_behaviors[i] = beh
+
 		var beh_lbl: Label3D = _citizen_nodes[i].get_meta("beh_lbl")
 		beh_lbl.text     = beh
 		beh_lbl.modulate = _behavior_color(beh)
@@ -219,6 +279,27 @@ func _update_citizens() -> void:
 			mat.albedo_color = Color(1.0, 0.5, 0.15)   # orange = hungry
 		else:
 			mat.albedo_color = Color(0.85, 0.65, 0.35) # normal
+
+		_fed_bars[i].value = fed
+		_hyd_bars[i].value = hyd
+
+	_update_resources()
+
+func _update_resources() -> void:
+	var count: int = _world_sim.get_resource_count()
+	for i in range(count):
+		var qty: float = _world_sim.get_resource_quantity(i)
+		# berry_bush shrinks as it depletes; water_source stays full
+		var s := maxf(0.15, qty)
+		_resource_meshes[i].scale = Vector3(s, s, s)
+
+func _animate_gathering() -> void:
+	for i in range(_citizen_nodes.size()):
+		if _citizen_behaviors[i] == "gathering":
+			var pulse := 1.0 + 0.12 * sin(_gather_time * 8.0)
+			_citizen_nodes[i].scale = Vector3(pulse, pulse, pulse)
+		else:
+			_citizen_nodes[i].scale = Vector3.ONE
 
 func _behavior_color(b: String) -> Color:
 	match b:

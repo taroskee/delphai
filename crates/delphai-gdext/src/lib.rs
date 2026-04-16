@@ -191,6 +191,16 @@ impl WorldNode {
             .unwrap_or_default()
     }
 
+    /// Current quantity of resource `idx` (0.0–1.0 for berry_bush; 1.0 for water_source).
+    #[func]
+    fn get_resource_quantity(&self, idx: i64) -> f64 {
+        self.world
+            .as_ref()
+            .and_then(|w| w.resources.get(idx as usize))
+            .map(|r| r.quantity.min(1.0) as f64)
+            .unwrap_or(0.0)
+    }
+
     // -------------------------------------------------------------------------
     // Phase 2 LLM hooks — preserved for reintegration, not wired into tick().
     // -------------------------------------------------------------------------
