@@ -2,19 +2,32 @@ extends Node3D
 
 ## Main 3D scene: drives Rust simulation, builds world geometry, syncs citizens each tick.
 
-const TILE_SIZE  := 1.0
-const MAP_WIDTH  := 24
-const MAP_HEIGHT := 14
-const TICK_RATE  := 4.0   # ticks per second
+const TILE_SIZE    := 1.0
+const MAP_WIDTH    := 24
+const MAP_HEIGHT   := 14
+const TICK_RATE    := 4.0    # ticks per second
+const DAY_TICKS    := 600    # one full day cycle in ticks (~2.5 min at 4 Hz)
+const CAM_ZOOM_MIN := 6.0
+const CAM_ZOOM_MAX := 30.0
+const CAM_PAN_SPEED := 0.025
 
 var _world_sim: WorldNode
-var _citizen_nodes: Array    = []
+var _citizen_nodes: Array     = []
 var _citizen_behaviors: Array = []  # cached behavior string per citizen
-var _resource_meshes: Array  = []   # MeshInstance3D per resource (for scale updates)
-var _fed_bars: Array         = []
-var _hyd_bars: Array         = []
-var _tick_acc: float         = 0.0
-var _gather_time: float      = 0.0
+var _resource_meshes: Array   = []  # MeshInstance3D per resource (for scale updates)
+var _fed_bars: Array          = []
+var _hyd_bars: Array          = []
+var _tick_acc: float          = 0.0
+var _gather_time: float       = 0.0
+
+# Camera rig
+var _cam: Camera3D            = null
+var _cam_dragging: bool       = false
+var _cam_drag_start: Vector2  = Vector2.ZERO
+var _cam_pos_start: Vector3   = Vector3.ZERO
+
+# Day/night
+var _sun: DirectionalLight3D  = null
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
@@ -32,6 +45,29 @@ func _ready() -> void:
 	_build_resources()
 	_build_citizens()
 	_build_debug_ui()
+	_build_bgm()
+
+func _input(event: InputEvent) -> void:
+	if _cam == null:
+		return
+	if event is InputEventMouseButton:
+		var btn := event as InputEventMouseButton
+		if btn.button_index == MOUSE_BUTTON_MIDDLE:
+			_cam_dragging = btn.pressed
+			if btn.pressed:
+				_cam_drag_start = btn.position
+				_cam_pos_start  = _cam.position
+		elif btn.button_index == MOUSE_BUTTON_WHEEL_UP:
+			_cam.position.y = clampf(_cam.position.y - 1.5, CAM_ZOOM_MIN, CAM_ZOOM_MAX)
+		elif btn.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			_cam.position.y = clampf(_cam.position.y + 1.5, CAM_ZOOM_MIN, CAM_ZOOM_MAX)
+	elif event is InputEventMouseMotion and _cam_dragging:
+		var motion := event as InputEventMouseMotion
+		var delta_px := motion.position - _cam_drag_start
+		# Scale pan by current zoom height so speed feels consistent
+		var zoom_scale := _cam.position.y / 18.0
+		_cam.position.x = _cam_pos_start.x - delta_px.x * CAM_PAN_SPEED * zoom_scale
+		_cam.position.z = _cam_pos_start.z - delta_px.y * CAM_PAN_SPEED * zoom_scale
 
 func _process(delta: float) -> void:
 	_tick_acc += delta
@@ -67,20 +103,30 @@ func _build_environment() -> void:
 	add_child(env_node)
 
 func _build_lighting() -> void:
-	var sun := DirectionalLight3D.new()
-	sun.name = "Sun"
-	sun.rotation_degrees = Vector3(-50.0, 35.0, 0.0)
-	sun.light_energy = 1.2
-	sun.shadow_enabled = true
-	add_child(sun)
+	_sun = DirectionalLight3D.new()
+	_sun.name = "Sun"
+	_sun.rotation_degrees = Vector3(-50.0, 35.0, 0.0)
+	_sun.light_energy = 1.2
+	_sun.shadow_enabled = true
+	add_child(_sun)
 
 func _build_camera() -> void:
-	var cam := Camera3D.new()
-	cam.name = "Camera3D"
+	_cam = Camera3D.new()
+	_cam.name = "Camera3D"
 	var c := _map_center()
-	cam.position = Vector3(c.x, 18.0, c.z + 10.0)
-	cam.rotation_degrees = Vector3(-55.0, 0.0, 0.0)
-	add_child(cam)
+	_cam.position = Vector3(c.x, 18.0, c.z + 10.0)
+	_cam.rotation_degrees = Vector3(-55.0, 0.0, 0.0)
+	add_child(_cam)
+
+func _build_bgm() -> void:
+	var player := AudioStreamPlayer.new()
+	player.name = "BGM"
+	var stream := load("res://assets/sfx/Ambience/CampAmbience.mp3")
+	if stream:
+		player.stream = stream
+		player.volume_db = -8.0
+		player.autoplay = true
+	add_child(player)
 
 func _build_terrain() -> void:
 	var body := StaticBody3D.new()
@@ -180,6 +226,16 @@ func _make_citizen(cname: String, idx: int) -> CharacterBody3D:
 	body.add_child(mesh_inst)
 	body.set_meta("mat", mat)
 
+	# Head sphere (simple humanoid silhouette)
+	var head_inst := MeshInstance3D.new()
+	var head_sphere := SphereMesh.new()
+	head_sphere.radius = 0.14
+	head_sphere.height = 0.28
+	head_inst.mesh = head_sphere
+	head_inst.position.y = 1.0
+	head_inst.material_override = mat
+	body.add_child(head_inst)
+
 	# Collision shape
 	var col := CollisionShape3D.new()
 	var cap_shape := CapsuleShape3D.new()
@@ -189,12 +245,12 @@ func _make_citizen(cname: String, idx: int) -> CharacterBody3D:
 	col.position.y = 0.5
 	body.add_child(col)
 
-	# Name label (billboard)
+	# Name label (billboard) — above head sphere (head top at ~y=1.14)
 	var name_lbl := Label3D.new()
 	name_lbl.text = cname
 	name_lbl.font_size = 28
 	name_lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	name_lbl.position.y = 1.15
+	name_lbl.position.y = 1.35
 	body.add_child(name_lbl)
 
 	# Behavior label (billboard)
@@ -202,7 +258,7 @@ func _make_citizen(cname: String, idx: int) -> CharacterBody3D:
 	beh_lbl.text = "idle"
 	beh_lbl.font_size = 22
 	beh_lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	beh_lbl.position.y = 1.4
+	beh_lbl.position.y = 1.6
 	beh_lbl.modulate = Color(0.9, 0.9, 0.9)
 	body.add_child(beh_lbl)
 	body.set_meta("beh_lbl", beh_lbl)
@@ -284,6 +340,17 @@ func _update_citizens() -> void:
 		_hyd_bars[i].value = hyd
 
 	_update_resources()
+	_update_day_night()
+
+func _update_day_night() -> void:
+	var tick: int = _world_sim.get_tick_count()
+	var progress := float(tick % DAY_TICKS) / float(DAY_TICKS)  # 0.0 → 1.0 per day
+	# Sun arcs from east (dawn) overhead (noon) to west (dusk): X goes -10° → -80° → -170°
+	var angle_x := -10.0 - 340.0 * progress
+	_sun.rotation_degrees.x = angle_x
+	# Brightness peaks at noon (progress ≈ 0.22), dim at night
+	var noon := 1.0 - absf(progress - 0.22) * 5.0
+	_sun.light_energy = lerpf(0.05, 1.4, clampf(noon, 0.0, 1.0))
 
 func _update_resources() -> void:
 	var count: int = _world_sim.get_resource_count()
