@@ -126,20 +126,20 @@ mod tests {
     }
 
     #[test]
-    fn sleeping_citizen_excluded() {
+    fn drinking_citizen_excluded() {
         let citizens = vec![
             idle("A", 0, 0),
-            with_state("B", 2, 0, BehaviorState::Sleeping),
+            with_state("B", 2, 0, BehaviorState::Drinking),
         ];
         let r = check_conversations(&citizens, 4, 0.5, 0.0);
         assert!(r.is_empty());
     }
 
     #[test]
-    fn eating_citizen_excluded() {
+    fn gathering_citizen_excluded() {
         let citizens = vec![
             idle("A", 0, 0),
-            with_state("B", 2, 0, BehaviorState::Eating),
+            with_state("B", 2, 0, BehaviorState::Gathering),
         ];
         let r = check_conversations(&citizens, 4, 0.5, 0.0);
         assert!(r.is_empty());

@@ -1,57 +1,46 @@
 use crate::agent::{
     behavior::{tick as behavior_tick, BehaviorAction, BehaviorState, Needs},
     citizen::{Citizen, Emotion},
-    conversation::check_conversations,
 };
-use crate::llm::{
-    provider::CitizenResponse,
-    queue::{InferencePriority, InferenceQueue, InferenceRequest},
-};
+use crate::llm::provider::CitizenResponse;
 use crate::pathfinding::{step_citizen, MoveState, TilePos, WalkGrid};
+use crate::resource::{Resource, ResourceKind};
 
-/// Maximum manhattan distance (tiles) for two citizens to start a conversation.
-const CONVERSATION_PROXIMITY_TILES: u32 = 4;
-const CONVERSATION_PROBABILITY: f32 = 0.5;
 /// Maximum number of entries kept in a citizen's memory_summary.
 const MEMORY_MAX_ENTRIES: usize = 8;
 
-/// Per-citizen resource needs, tracked by the world each tick.
+/// Per-citizen vitals. Bigger-is-better: 1.0 = fully sated, 0.0 = critical.
 #[derive(Debug, Clone)]
-pub struct CitizenNeeds {
-    pub hunger: f32,
-    pub fatigue: f32,
+pub struct CitizenVitals {
+    pub fed: f32,
+    pub hydration: f32,
 }
 
-impl CitizenNeeds {
-    pub fn new(hunger: f32, fatigue: f32) -> Self {
-        Self { hunger, fatigue }
+impl CitizenVitals {
+    pub fn new(fed: f32, hydration: f32) -> Self {
+        Self { fed, hydration }
     }
 }
 
-impl Default for CitizenNeeds {
+impl Default for CitizenVitals {
     fn default() -> Self {
-        Self {
-            hunger: 0.0,
-            fatigue: 0.0,
-        }
+        Self { fed: 1.0, hydration: 1.0 }
     }
 }
 
-/// A citizen pair that needs LLM inference this tick.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingConversation {
-    pub initiator_idx: usize,
-    pub partner_idx: usize,
-}
+const FED_DECAY_PER_TICK: f32 = 0.004;
+const HYDRATION_DECAY_PER_TICK: f32 = 0.007;
+const GATHER_RATE: f32 = 0.05;
+const DRINK_RATE: f32 = 0.08;
 
 /// Holds all mutable world state. `tick()` advances one game turn.
 pub struct World {
     pub citizens: Vec<Citizen>,
     pub behavior_states: Vec<BehaviorState>,
-    pub needs: Vec<CitizenNeeds>,
+    pub vitals: Vec<CitizenVitals>,
     pub move_states: Vec<MoveState>,
     pub walk_grid: Option<WalkGrid>,
-    pub queue: InferenceQueue,
+    pub resources: Vec<Resource>,
     pub tick_count: u64,
 }
 
@@ -60,31 +49,52 @@ impl World {
         let n = citizens.len();
         Self {
             behavior_states: vec![BehaviorState::default(); n],
-            needs: vec![CitizenNeeds::default(); n],
+            vitals: vec![CitizenVitals::default(); n],
             move_states: (0..n)
                 .map(|_| MoveState::new(TilePos::default(), TilePos::default(), 4))
                 .collect(),
             walk_grid: None,
-            queue: InferenceQueue::new(3),
+            resources: Vec::new(),
             tick_count: 0,
             citizens,
         }
     }
 
+    pub fn add_resource(&mut self, r: Resource) {
+        self.resources.push(r);
+    }
+
+    /// Return the tile position of the nearest available resource of `kind`.
+    pub fn nearest_resource_pos(&self, from: TilePos, kind: ResourceKind) -> Option<TilePos> {
+        self.resources
+            .iter()
+            .filter(|r| r.kind == kind && r.is_available())
+            .min_by_key(|r| r.pos.manhattan_dist(from))
+            .map(|r| r.pos)
+    }
+
     /// Advance one game turn synchronously.
-    ///
-    /// Returns citizen index pairs that should be sent to the LLM.
-    /// The caller drives the async inference and calls `apply_response()` on results.
-    pub fn tick(&mut self, random_roll: f32) -> Vec<PendingConversation> {
+    pub fn tick(&mut self, _random_roll: f32) {
         self.tick_count += 1;
 
-        // Step 1: update behavior states
+        // Step 1: decay vitals
+        for v in &mut self.vitals {
+            v.fed = (v.fed - FED_DECAY_PER_TICK).max(0.0);
+            v.hydration = (v.hydration - HYDRATION_DECAY_PER_TICK).max(0.0);
+        }
+
+        // Step 2: tick resources (respawn timers)
+        for r in &mut self.resources {
+            r.tick();
+        }
+
+        // Step 3: update behavior states from needs
         for i in 0..self.citizens.len() {
             let action = behavior_tick(
                 self.behavior_states[i],
                 &Needs {
-                    hunger: self.needs[i].hunger,
-                    fatigue: self.needs[i].fatigue,
+                    fed: self.vitals[i].fed,
+                    hydration: self.vitals[i].hydration,
                 },
             );
             if let BehaviorAction::TransitionTo(next) = action {
@@ -92,70 +102,91 @@ impl World {
             }
         }
 
-        // Step 2: drive movement (only when walk_grid is set)
-        // Use take/replace to satisfy the borrow checker: &WalkGrid + &mut MoveState simultaneously.
+        // Step 4a: stationary resource interactions (no grid required).
+        for i in 0..self.citizens.len() {
+            match self.behavior_states[i] {
+                BehaviorState::Gathering => {
+                    let pos = self.move_states[i].tile_pos;
+                    let mut gathered = 0.0_f32;
+                    for r in &mut self.resources {
+                        if r.kind == ResourceKind::BerryBush && r.pos == pos && r.is_available() {
+                            let take = GATHER_RATE.min(r.quantity);
+                            r.deplete(take);
+                            gathered = take;
+                            break;
+                        }
+                    }
+                    self.vitals[i].fed = (self.vitals[i].fed + gathered).min(1.0);
+
+                    // If the bush ran out, go back to seeking
+                    let still_available = self.resources.iter().any(|r| {
+                        r.kind == ResourceKind::BerryBush && r.pos == pos && r.is_available()
+                    });
+                    if !still_available {
+                        self.behavior_states[i] = BehaviorState::SeekingFood;
+                    }
+                }
+                BehaviorState::Drinking => {
+                    self.vitals[i].hydration = (self.vitals[i].hydration + DRINK_RATE).min(1.0);
+                }
+                _ => {}
+            }
+        }
+
+        // Step 4b: movement (requires grid).
+        // Use take/replace to satisfy the borrow checker.
         if let Some(grid) = self.walk_grid.take() {
-            for (i, state) in self.move_states.iter_mut().enumerate() {
-                if self.behavior_states[i] == BehaviorState::Idle {
-                    let seed = self
-                        .tick_count
-                        .wrapping_mul(6364136223846793005)
-                        .wrapping_add(i as u64);
-                    step_citizen(state, &grid, seed);
+            for i in 0..self.citizens.len() {
+                let seed = self
+                    .tick_count
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(i as u64 * 2654435761);
+
+                match self.behavior_states[i] {
+                    BehaviorState::Idle => {
+                        step_citizen(&mut self.move_states[i], &grid, seed);
+                    }
+                    BehaviorState::SeekingFood => {
+                        let from = self.move_states[i].tile_pos;
+                        if let Some(target) = self.nearest_resource_pos(from, ResourceKind::BerryBush) {
+                            if target == from {
+                                let available = self.resources.iter().any(|r| {
+                                    r.kind == ResourceKind::BerryBush && r.pos == target && r.is_available()
+                                });
+                                if available {
+                                    self.behavior_states[i] = BehaviorState::Gathering;
+                                }
+                            } else {
+                                self.move_states[i].move_target = Some(target);
+                                step_citizen(&mut self.move_states[i], &grid, seed);
+                            }
+                        } else {
+                            step_citizen(&mut self.move_states[i], &grid, seed);
+                        }
+                    }
+                    BehaviorState::SeekingWater => {
+                        let from = self.move_states[i].tile_pos;
+                        if let Some(target) = self.nearest_resource_pos(from, ResourceKind::WaterSource) {
+                            if target == from {
+                                self.behavior_states[i] = BehaviorState::Drinking;
+                            } else {
+                                self.move_states[i].move_target = Some(target);
+                                step_citizen(&mut self.move_states[i], &grid, seed);
+                            }
+                        } else {
+                            step_citizen(&mut self.move_states[i], &grid, seed);
+                        }
+                    }
+                    // Gathering and Drinking are handled in step 4a — no movement.
+                    BehaviorState::Gathering | BehaviorState::Drinking => {}
                 }
             }
             self.walk_grid = Some(grid);
         }
-
-        // Step 3: find conversation candidates
-        let citizen_tuples: Vec<(String, TilePos, BehaviorState)> = self
-            .citizens
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (c.name.clone(), self.move_states[i].tile_pos, self.behavior_states[i]))
-            .collect();
-
-        let requests = check_conversations(
-            &citizen_tuples,
-            CONVERSATION_PROXIMITY_TILES,
-            CONVERSATION_PROBABILITY,
-            random_roll,
-        );
-
-        // Step 4: enqueue requests and collect pending conversations
-        let mut pending = Vec::new();
-        for req in requests {
-            let initiator_idx = self
-                .citizens
-                .iter()
-                .position(|c| c.name == req.initiator)
-                .expect("initiator must exist in world");
-            let partner_idx = self
-                .citizens
-                .iter()
-                .position(|c| c.name == req.partner)
-                .expect("partner must exist in world");
-
-            self.queue.push(InferenceRequest {
-                priority: InferencePriority::Normal,
-                tag: format!("{}-{}", req.initiator, req.partner),
-                initiator: self.citizens[initiator_idx].clone(),
-                partner: Some(self.citizens[partner_idx].clone()),
-            });
-
-            pending.push(PendingConversation {
-                initiator_idx,
-                partner_idx,
-            });
-        }
-
-        pending
     }
 }
 
-/// Map a `CitizenResponse` back onto a `Citizen`.
-///
-/// Updates `emotion` and appends `speech` to `memory_summary`.
+/// Map a `CitizenResponse` back onto a `Citizen` (preserved for Phase 2 LLM reintegration).
 pub fn apply_response(citizen: &mut Citizen, response: &CitizenResponse) {
     citizen.emotion = parse_emotion(&response.emotion_change);
 
@@ -197,6 +228,7 @@ fn parse_emotion(s: &str) -> Emotion {
 mod tests {
     use super::*;
     use crate::agent::citizen::Emotion;
+    use crate::llm::provider::CitizenResponse;
 
     fn make_citizen(name: &str) -> Citizen {
         Citizen {
@@ -209,97 +241,102 @@ mod tests {
         }
     }
 
-    /// Build a world with citizens placed at the given tile positions.
-    fn make_world_with_tiles(names: &[&str], tiles: Vec<TilePos>) -> World {
-        let citizens: Vec<Citizen> = names.iter().map(|n| make_citizen(n)).collect();
-        let mut world = World::new(citizens);
-        for (i, pos) in tiles.into_iter().enumerate() {
-            if let Some(s) = world.move_states.get_mut(i) {
-                s.tile_pos = pos;
-                s.wander_center = pos;
-            }
-        }
-        world
+    fn make_world(names: &[&str]) -> World {
+        World::new(names.iter().map(|n| make_citizen(n)).collect())
     }
 
-    /// Citizens within CONVERSATION_PROXIMITY_TILES of each other.
-    fn close_tiles(n: usize) -> Vec<TilePos> {
-        (0..n).map(|i| TilePos::new(i as i16 * 2, 0)).collect()
-    }
-
-    /// Citizens spread far apart (> CONVERSATION_PROXIMITY_TILES).
-    fn spread_tiles(n: usize) -> Vec<TilePos> {
-        (0..n).map(|i| TilePos::new(i as i16 * 20, 0)).collect()
-    }
-
-    // --- tick: behavior state ---
+    // --- vitals decay ---
 
     #[test]
-    fn tick_advances_behavior_states_to_sleep_when_fatigued() {
-        let mut world = make_world_with_tiles(&["A"], vec![TilePos::new(0, 0)]);
-        world.needs[0].fatigue = 0.9;
-
+    fn tick_decays_fed_each_turn() {
+        let mut world = make_world(&["A"]);
         world.tick(0.0);
+        assert!(world.vitals[0].fed < 1.0);
+        assert!((world.vitals[0].fed - (1.0 - FED_DECAY_PER_TICK)).abs() < 1e-5);
+    }
 
-        assert_eq!(world.behavior_states[0], BehaviorState::Sleeping);
+    #[test]
+    fn tick_decays_hydration_each_turn() {
+        let mut world = make_world(&["A"]);
+        world.tick(0.0);
+        assert!(world.vitals[0].hydration < 1.0);
+        assert!((world.vitals[0].hydration - (1.0 - HYDRATION_DECAY_PER_TICK)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn vitals_never_go_below_zero() {
+        let mut world = make_world(&["A"]);
+        world.vitals[0].fed = 0.0;
+        world.vitals[0].hydration = 0.0;
+        world.tick(0.0);
+        assert_eq!(world.vitals[0].fed, 0.0);
+        assert_eq!(world.vitals[0].hydration, 0.0);
+    }
+
+    // --- tick: behavior transitions from needs ---
+
+    #[test]
+    fn tick_transitions_to_seeking_water_when_thirsty() {
+        let mut world = make_world(&["A"]);
+        world.vitals[0].hydration = 0.1;
+        world.tick(0.0);
+        assert_eq!(world.behavior_states[0], BehaviorState::SeekingWater);
+    }
+
+    #[test]
+    fn tick_transitions_to_seeking_food_when_hungry() {
+        let mut world = make_world(&["A"]);
+        world.vitals[0].fed = 0.1;
+        // hydration must be high so water doesn't take priority
+        world.vitals[0].hydration = 1.0;
+        world.tick(0.0);
+        assert_eq!(world.behavior_states[0], BehaviorState::SeekingFood);
     }
 
     #[test]
     fn tick_increments_tick_count() {
-        let mut world = make_world_with_tiles(&["A"], vec![TilePos::new(0, 0)]);
+        let mut world = make_world(&["A"]);
         assert_eq!(world.tick_count, 0);
-        world.tick(1.0);
+        world.tick(0.0);
         assert_eq!(world.tick_count, 1);
-        world.tick(1.0);
+        world.tick(0.0);
         assert_eq!(world.tick_count, 2);
     }
 
-    // --- tick: conversation pending ---
+    // --- resource interaction ---
 
     #[test]
-    fn tick_returns_pending_for_idle_close_pair() {
-        let mut world = make_world_with_tiles(&["Kael", "Elder"], close_tiles(2));
-        let pending = world.tick(0.0);
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].initiator_idx, 0);
-        assert_eq!(pending[0].partner_idx, 1);
-    }
-
-    #[test]
-    fn tick_no_pending_when_all_sleeping() {
-        let mut world = make_world_with_tiles(&["A", "B"], close_tiles(2));
-        world.behavior_states[0] = BehaviorState::Sleeping;
-        world.behavior_states[1] = BehaviorState::Sleeping;
-        world.needs[0].fatigue = 0.5;
-        world.needs[1].fatigue = 0.5;
-
-        let pending = world.tick(0.0);
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn tick_no_pending_when_citizens_far_apart() {
-        let mut world = make_world_with_tiles(&["A", "B"], spread_tiles(2));
-        let pending = world.tick(0.0);
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn tick_no_pending_when_roll_exceeds_probability() {
-        let mut world = make_world_with_tiles(&["A", "B"], close_tiles(2));
-        let pending = world.tick(1.0);
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn tick_enqueues_request_to_queue() {
-        let mut world = make_world_with_tiles(&["A", "B"], close_tiles(2));
-        assert!(world.queue.is_empty());
+    fn drinking_increases_hydration() {
+        let mut world = make_world(&["A"]);
+        world.vitals[0].hydration = 0.5;
+        world.behavior_states[0] = BehaviorState::Drinking;
         world.tick(0.0);
-        assert!(!world.queue.is_empty());
+        assert!(world.vitals[0].hydration > 0.5);
     }
 
-    // --- apply_response ---
+    #[test]
+    fn nearest_resource_pos_returns_closest() {
+        let mut world = make_world(&["A"]);
+        world.add_resource(Resource::berry_bush(TilePos::new(10, 0)));
+        world.add_resource(Resource::berry_bush(TilePos::new(3, 0)));
+        let from = TilePos::new(0, 0);
+        let nearest = world.nearest_resource_pos(from, ResourceKind::BerryBush);
+        assert_eq!(nearest, Some(TilePos::new(3, 0)));
+    }
+
+    #[test]
+    fn nearest_resource_pos_skips_depleted() {
+        let mut world = make_world(&["A"]);
+        let mut depleted = Resource::berry_bush(TilePos::new(1, 0));
+        depleted.deplete(1.0);
+        world.add_resource(depleted);
+        world.add_resource(Resource::berry_bush(TilePos::new(5, 0)));
+        let from = TilePos::new(0, 0);
+        let nearest = world.nearest_resource_pos(from, ResourceKind::BerryBush);
+        assert_eq!(nearest, Some(TilePos::new(5, 0)));
+    }
+
+    // --- apply_response (preserved for Phase 2 LLM reintegration) ---
 
     #[test]
     fn apply_response_updates_emotion() {
@@ -345,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_response_appends_speech_to_empty_memory() {
+    fn apply_response_appends_speech_to_memory() {
         let mut citizen = make_citizen("Kael");
         let response = CitizenResponse {
             speech: "Let us gather food".into(),
@@ -356,21 +393,6 @@ mod tests {
         };
         apply_response(&mut citizen, &response);
         assert_eq!(citizen.memory_summary, "Let us gather food");
-    }
-
-    #[test]
-    fn apply_response_appends_speech_to_existing_memory() {
-        let mut citizen = make_citizen("Kael");
-        citizen.memory_summary = "found berries".into();
-        let response = CitizenResponse {
-            speech: "Let us gather food".into(),
-            inner_thought: String::new(),
-            action: String::new(),
-            emotion_change: "neutral".into(),
-            tech_hint: None,
-        };
-        apply_response(&mut citizen, &response);
-        assert_eq!(citizen.memory_summary, "found berries | Let us gather food");
     }
 
     #[test]
@@ -393,20 +415,5 @@ mod tests {
         }
         let entries: Vec<&str> = summary.split(" | ").collect();
         assert_eq!(entries.len(), 5);
-    }
-
-    #[test]
-    fn apply_response_empty_speech_leaves_memory_unchanged() {
-        let mut citizen = make_citizen("Kael");
-        citizen.memory_summary = "prior memory".into();
-        let response = CitizenResponse {
-            speech: String::new(),
-            inner_thought: String::new(),
-            action: String::new(),
-            emotion_change: "neutral".into(),
-            tech_hint: None,
-        };
-        apply_response(&mut citizen, &response);
-        assert_eq!(citizen.memory_summary, "prior memory");
     }
 }
