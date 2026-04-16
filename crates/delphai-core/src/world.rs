@@ -5,6 +5,7 @@ use crate::agent::{
 use crate::llm::provider::CitizenResponse;
 use crate::pathfinding::{step_citizen, MoveState, TilePos, WalkGrid};
 use crate::resource::{Resource, ResourceKind};
+use crate::tech::TechTree;
 
 /// Maximum number of entries kept in a citizen's memory_summary.
 const MEMORY_MAX_ENTRIES: usize = 8;
@@ -41,6 +42,7 @@ pub struct World {
     pub move_states: Vec<MoveState>,
     pub walk_grid: Option<WalkGrid>,
     pub resources: Vec<Resource>,
+    pub tech_tree: TechTree,
     pub tick_count: u64,
 }
 
@@ -55,8 +57,18 @@ impl World {
                 .collect(),
             walk_grid: None,
             resources: Vec::new(),
+            tech_tree: TechTree::new(),
             tick_count: 0,
             citizens,
+        }
+    }
+
+    /// Effective gather rate — 1.5× after stone tools unlock.
+    fn effective_gather_rate(&self) -> f32 {
+        if self.tech_tree.is_unlocked(0) {
+            GATHER_RATE * 1.5
+        } else {
+            GATHER_RATE
         }
     }
 
@@ -107,14 +119,18 @@ impl World {
             match self.behavior_states[i] {
                 BehaviorState::Gathering => {
                     let pos = self.move_states[i].tile_pos;
+                    let rate = self.effective_gather_rate();
                     let mut gathered = 0.0_f32;
                     for r in &mut self.resources {
                         if r.kind == ResourceKind::BerryBush && r.pos == pos && r.is_available() {
-                            let take = GATHER_RATE.min(r.quantity);
+                            let take = rate.min(r.quantity);
                             r.deplete(take);
                             gathered = take;
                             break;
                         }
+                    }
+                    if gathered > 0.0 {
+                        self.tech_tree.add_points(1);
                     }
                     self.vitals[i].fed = (self.vitals[i].fed + gathered).min(1.0);
 

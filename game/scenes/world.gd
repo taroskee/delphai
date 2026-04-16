@@ -20,6 +20,10 @@ var _hyd_bars: Array          = []
 var _tick_acc: float          = 0.0
 var _gather_time: float       = 0.0
 
+# Tech UI
+var _tech_bar: ProgressBar    = null
+var _tech_lbl: Label          = null   # "Stone Tools  12 / 50"
+
 # Camera rig
 var _cam: Camera3D            = null
 var _cam_dragging: bool       = false
@@ -45,6 +49,7 @@ func _ready() -> void:
 	_build_resources()
 	_build_citizens()
 	_build_debug_ui()
+	_build_tech_ui()
 	_build_bgm()
 
 func _input(event: InputEvent) -> void:
@@ -309,6 +314,35 @@ func _build_debug_ui() -> void:
 		row.add_child(hyd_bar)
 		_hyd_bars.append(hyd_bar)
 
+func _build_tech_ui() -> void:
+	var layer := CanvasLayer.new()
+	layer.name = "TechUI"
+	add_child(layer)
+
+	var panel := VBoxContainer.new()
+	panel.name = "TechPanel"
+	panel.set_anchor_and_offset(SIDE_RIGHT, 1.0, -210.0)
+	panel.set_anchor_and_offset(SIDE_TOP, 0.0, 10.0)
+	layer.add_child(panel)
+
+	var title := Label.new()
+	title.text = "Research"
+	title.add_theme_color_override("font_color", Color(1.0, 0.9, 0.5))
+	panel.add_child(title)
+
+	_tech_lbl = Label.new()
+	_tech_lbl.text = "—"
+	panel.add_child(_tech_lbl)
+
+	_tech_bar = ProgressBar.new()
+	_tech_bar.min_value = 0.0
+	_tech_bar.max_value = 1.0
+	_tech_bar.value = 0.0
+	_tech_bar.custom_minimum_size = Vector2(200, 20)
+	_tech_bar.modulate = Color(1.0, 0.85, 0.2)
+	_tech_bar.show_percentage = false
+	panel.add_child(_tech_bar)
+
 # ── Per-tick updates ──────────────────────────────────────────────────────────
 
 func _sync_citizen_pos(idx: int) -> void:
@@ -341,6 +375,7 @@ func _update_citizens() -> void:
 
 	_update_resources()
 	_update_day_night()
+	_update_tech_ui()
 
 func _update_day_night() -> void:
 	var tick: int = _world_sim.get_tick_count()
@@ -351,6 +386,20 @@ func _update_day_night() -> void:
 	# Brightness peaks at noon (progress ≈ 0.22), dim at night
 	var noon := 1.0 - absf(progress - 0.22) * 5.0
 	_sun.light_energy = lerpf(0.05, 1.4, clampf(noon, 0.0, 1.0))
+
+func _update_tech_ui() -> void:
+	if _tech_lbl == null or _tech_bar == null:
+		return
+	var pts: int    = _world_sim.get_research_points()
+	var name: String = _world_sim.get_next_tech_name()
+	var req: int    = _world_sim.get_next_tech_required()
+	if name == "":
+		_tech_lbl.text  = "All techs unlocked!"
+		_tech_bar.value = 1.0
+	else:
+		_tech_lbl.text  = "%s  %d / %d" % [name.replace("_", " ").capitalize(), pts, req]
+		_tech_bar.max_value = float(req) if req > 0 else 1.0
+		_tech_bar.value     = float(pts)
 
 func _update_resources() -> void:
 	var count: int = _world_sim.get_resource_count()

@@ -202,6 +202,35 @@ impl WorldNode {
     }
 
     // -------------------------------------------------------------------------
+    // Tech tree
+    // -------------------------------------------------------------------------
+
+    /// Current accumulated research points.
+    #[func]
+    fn get_research_points(&self) -> i64 {
+        self.world.as_ref().map_or(0, |w| w.tech_tree.research_points as i64)
+    }
+
+    /// Name of the next technology to unlock, or empty string if all are unlocked.
+    #[func]
+    fn get_next_tech_name(&self) -> GString {
+        self.world
+            .as_ref()
+            .and_then(|w| w.tech_tree.next_tech_name())
+            .map(GString::from)
+            .unwrap_or_default()
+    }
+
+    /// Research points required to unlock the next technology (0 if all unlocked).
+    #[func]
+    fn get_next_tech_required(&self) -> i64 {
+        self.world
+            .as_ref()
+            .and_then(|w| w.tech_tree.next_required_points())
+            .unwrap_or(0) as i64
+    }
+
+    // -------------------------------------------------------------------------
     // Phase 2 LLM hooks — preserved for reintegration, not wired into tick().
     // -------------------------------------------------------------------------
 
