@@ -280,6 +280,21 @@ impl WorldNode {
             .unwrap_or(false)
     }
 
+    /// Read and clear the one-shot `fled` flag.  Returns true once when the
+    /// animal has just escaped off the map edge; false every other call.
+    #[func]
+    fn pop_animal_fled(&mut self, idx: i64) -> bool {
+        self.world
+            .as_mut()
+            .and_then(|w| w.animals.get_mut(idx as usize))
+            .map(|a| {
+                let v = a.fled;
+                a.fled = false;
+                v
+            })
+            .unwrap_or(false)
+    }
+
     // -------------------------------------------------------------------------
     // Phase 2 LLM hooks — preserved for reintegration, not wired into tick().
     // -------------------------------------------------------------------------

@@ -490,11 +490,31 @@ func _update_resources() -> void:
 func _update_animals() -> void:
 	var count: int = _world_sim.get_animal_count()
 	for i in range(count):
+		var fled: bool = _world_sim.pop_animal_fled(i)
 		var alive: bool = _world_sim.get_animal_alive(i)
-		_animal_nodes[i].visible = alive
-		if alive:
+		var anode: Node3D = _animal_nodes[i]
+
+		if fled:
+			# Deer just escaped off the map — fade it out then hide.
+			var mesh_inst: MeshInstance3D = anode.get_child(0) as MeshInstance3D
+			var mat: StandardMaterial3D = mesh_inst.material_override as StandardMaterial3D
+			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			var tween := create_tween()
+			tween.tween_property(mat, "albedo_color:a", 0.0, 0.6)
+			tween.tween_callback(func(): anode.visible = false)
+		elif alive:
+			# Deer is alive — make sure it is visible.
 			var tile: Vector2i = _world_sim.get_animal_pos(i)
-			_animal_nodes[i].position = tile_to_world(tile.x, tile.y)
+			anode.position = tile_to_world(tile.x, tile.y)
+			if not anode.visible:
+				# Just respawned — fade in from transparent.
+				var mesh_inst: MeshInstance3D = anode.get_child(0) as MeshInstance3D
+				var mat: StandardMaterial3D = mesh_inst.material_override as StandardMaterial3D
+				mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+				mat.albedo_color.a = 0.0
+				anode.visible = true
+				var tween := create_tween()
+				tween.tween_property(mat, "albedo_color:a", 1.0, 0.6)
 
 func _update_chat_bubbles(delta: float) -> void:
 	for i in range(_citizen_nodes.size()):

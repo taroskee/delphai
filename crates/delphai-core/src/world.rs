@@ -301,16 +301,31 @@ impl World {
             }
         }
 
-        // Step 4d: animal respawn + wander.
+        // Step 4d: animal respawn + wander / flee.
         let do_wander = Animal::should_wander(self.tick_count);
+        let human_positions: Vec<TilePos> =
+            self.move_states.iter().map(|ms| ms.tile_pos).collect();
+        let nearest_humans: Vec<Option<TilePos>> = self
+            .animals
+            .iter()
+            .map(|a| {
+                if !a.alive {
+                    return None;
+                }
+                human_positions
+                    .iter()
+                    .copied()
+                    .min_by_key(|hp| hp.manhattan_dist(a.pos))
+            })
+            .collect();
         for (ai, animal) in self.animals.iter_mut().enumerate() {
-            animal.tick_respawn();
+            let seed = self
+                .tick_count
+                .wrapping_mul(1442695040888963407)
+                .wrapping_add(ai as u64 * 6364136223846793005);
+            animal.tick_respawn(seed);
             if do_wander {
-                let seed = self
-                    .tick_count
-                    .wrapping_mul(1442695040888963407)
-                    .wrapping_add(ai as u64 * 6364136223846793005);
-                animal.wander(seed);
+                animal.flee_or_wander(nearest_humans[ai], seed);
             }
         }
 
