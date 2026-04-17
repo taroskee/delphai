@@ -2,6 +2,7 @@ use crate::agent::{
     behavior::{tick as behavior_tick, BehaviorAction, BehaviorState, Needs},
     citizen::{Citizen, Emotion},
 };
+use crate::animal::Animal;
 use crate::llm::provider::CitizenResponse;
 use crate::pathfinding::{step_citizen, MoveState, TilePos, WalkGrid};
 use crate::resource::{Resource, ResourceKind, BERRY_BUSH_RESPAWN_TICKS};
@@ -34,6 +35,8 @@ const HYDRATION_DECAY_PER_TICK: f32 = 0.007;
 const GATHER_RATE: f32 = 0.05;
 const DRINK_RATE: f32 = 0.08;
 const MAX_CITIZENS: usize = 8;
+/// Food gained by each hunter when a kill succeeds.
+const HUNT_FED_GAIN: f32 = 0.5;
 /// All citizens must have fed > this AND hydration > this to accumulate prosperity.
 const PROSPERITY_VITALS_THRESHOLD: f32 = 0.8;
 /// Prosperity ticks needed before a new citizen is born.
@@ -55,6 +58,8 @@ pub struct World {
     pub move_states: Vec<MoveState>,
     pub walk_grid: Option<WalkGrid>,
     pub resources: Vec<Resource>,
+    pub animals: Vec<Animal>,
+    /// Preserved for Phase 2 reintegration — not wired into Phase 1 gameplay.
     pub tech_tree: TechTree,
     pub tick_count: u64,
     /// Accumulated ticks where all citizens are well-fed and hydrated.
@@ -74,6 +79,7 @@ impl World {
                 .collect(),
             walk_grid: None,
             resources: Vec::new(),
+            animals: Vec::new(),
             tech_tree: TechTree::new(),
             tick_count: 0,
             prosperity_ticks: 0,
@@ -82,26 +88,19 @@ impl World {
         }
     }
 
-    /// Effective gather rate:
-    ///   base → × 1.5 after stone_tools (id=0) → × 2.0 after bronze_tools (id=2).
-    fn effective_gather_rate(&self) -> f32 {
-        if self.tech_tree.is_unlocked(2) {
-            GATHER_RATE * 2.0
-        } else if self.tech_tree.is_unlocked(0) {
-            GATHER_RATE * 1.5
-        } else {
-            GATHER_RATE
-        }
+    pub fn add_animal(&mut self, a: Animal) {
+        self.animals.push(a);
     }
 
-    /// Effective berry bush respawn ticks: halved after agriculture (id=1).
-    fn effective_respawn_ticks(&self) -> u32 {
-        if self.tech_tree.is_unlocked(1) {
-            BERRY_BUSH_RESPAWN_TICKS / 3
-        } else {
-            BERRY_BUSH_RESPAWN_TICKS
-        }
+    /// Return the tile position of the nearest alive animal.
+    pub fn nearest_animal_pos(&self, from: TilePos) -> Option<TilePos> {
+        self.animals
+            .iter()
+            .filter(|a| a.alive)
+            .min_by_key(|a| a.pos.manhattan_dist(from))
+            .map(|a| a.pos)
     }
+
 
     /// Attempt to spawn a new citizen when the tribe is thriving.
     fn maybe_spawn_citizen(&mut self) {
@@ -164,7 +163,9 @@ impl World {
             r.tick();
         }
 
-        // Step 3: update behavior states from needs
+        // Step 3: update behavior states from needs.
+        // After behavior_tick, override Idle→Hunting when hungry and animals exist.
+        let any_alive_animal = self.animals.iter().any(|a| a.alive);
         for i in 0..self.citizens.len() {
             let action = behavior_tick(
                 self.behavior_states[i],
@@ -176,6 +177,13 @@ impl World {
             if let BehaviorAction::TransitionTo(next) = action {
                 self.behavior_states[i] = next;
             }
+            // Prefer hunting over berry-gathering when fed < threshold and animals available.
+            if self.behavior_states[i] == BehaviorState::SeekingFood
+                && any_alive_animal
+                && self.vitals[i].fed > 0.15 // still strong enough to hunt
+            {
+                self.behavior_states[i] = BehaviorState::Hunting;
+            }
         }
 
         // Step 4a: stationary resource interactions (no grid required).
@@ -183,19 +191,14 @@ impl World {
             match self.behavior_states[i] {
                 BehaviorState::Gathering => {
                     let pos = self.move_states[i].tile_pos;
-                    let rate = self.effective_gather_rate();
-                    let respawn_ticks = self.effective_respawn_ticks();
                     let mut gathered = 0.0_f32;
                     for r in &mut self.resources {
                         if r.kind == ResourceKind::BerryBush && r.pos == pos && r.is_available() {
-                            let take = rate.min(r.quantity);
-                            r.deplete_with_respawn(take, respawn_ticks);
+                            let take = GATHER_RATE.min(r.quantity);
+                            r.deplete_with_respawn(take, BERRY_BUSH_RESPAWN_TICKS);
                             gathered = take;
                             break;
                         }
-                    }
-                    if gathered > 0.0 {
-                        self.tech_tree.add_points(1);
                     }
                     self.vitals[i].fed = (self.vitals[i].fed + gathered).min(1.0);
 
@@ -258,11 +261,57 @@ impl World {
                             step_citizen(&mut self.move_states[i], &grid, seed);
                         }
                     }
+                    BehaviorState::Hunting => {
+                        let from = self.move_states[i].tile_pos;
+                        if let Some(target) = self.nearest_animal_pos(from) {
+                            if target != from {
+                                self.move_states[i].move_target = Some(target);
+                                step_citizen(&mut self.move_states[i], &grid, seed);
+                            }
+                            // At target tile: wait for other hunters (resolved in step 4c).
+                        } else {
+                            // No animals alive — fall back to berry gathering.
+                            self.behavior_states[i] = BehaviorState::SeekingFood;
+                        }
+                    }
                     // Gathering and Drinking are handled in step 4a — no movement.
                     BehaviorState::Gathering | BehaviorState::Drinking => {}
                 }
             }
             self.walk_grid = Some(grid);
+        }
+
+        // Step 4c: cooperative hunting — kill animals with 2+ hunters on same tile.
+        for ai in 0..self.animals.len() {
+            if !self.animals[ai].alive {
+                continue;
+            }
+            let animal_pos = self.animals[ai].pos;
+            let hunters_here: Vec<usize> = (0..self.citizens.len())
+                .filter(|&ci| {
+                    self.behavior_states[ci] == BehaviorState::Hunting
+                        && self.move_states[ci].tile_pos == animal_pos
+                })
+                .collect();
+            if hunters_here.len() >= 2 {
+                self.animals[ai].kill();
+                for ci in hunters_here {
+                    self.vitals[ci].fed = (self.vitals[ci].fed + HUNT_FED_GAIN).min(1.0);
+                }
+            }
+        }
+
+        // Step 4d: animal respawn + wander.
+        let do_wander = Animal::should_wander(self.tick_count);
+        for (ai, animal) in self.animals.iter_mut().enumerate() {
+            animal.tick_respawn();
+            if do_wander {
+                let seed = self
+                    .tick_count
+                    .wrapping_mul(1442695040888963407)
+                    .wrapping_add(ai as u64 * 6364136223846793005);
+                animal.wander(seed);
+            }
         }
 
         // Step 5: population growth when the tribe is thriving.

@@ -11,6 +11,16 @@ const CAM_ZOOM_MIN := 6.0
 const CAM_ZOOM_MAX := 30.0
 const CAM_PAN_SPEED := 0.025
 
+# Citizen chat bubble lines (Japanese) keyed by behavior state
+const CHAT_LINES := {
+	"idle":          ["のんびり...", "いい天気だ", "休憩しよう", "静かだな", "平和だな"],
+	"seeking_food":  ["お腹すいた！", "何か食べ物を...", "腹ペコだ...", "食料が必要だ"],
+	"gathering":     ["いただき！", "美味しそう", "収穫だ！", "食料を集める"],
+	"seeking_water": ["喉が渇いた！", "水が欲しい...", "水源を探せ", "水..."],
+	"drinking":      ["うまい！", "生き返る...", "水は命だ", "ふぅ..."],
+	"hunting":       ["みんなで狩ろう！", "獲物を追え！", "協力だ！", "行くぞ！"],
+}
+
 var _world_sim: WorldNode
 var _citizen_nodes: Array     = []
 var _citizen_behaviors: Array = []  # cached behavior string per citizen
@@ -20,12 +30,16 @@ var _hyd_bars: Array          = []
 var _tick_acc: float          = 0.0
 var _gather_time: float       = 0.0
 
-# Tech UI
-var _tech_bar: ProgressBar    = null
-var _tech_lbl: Label          = null   # "Stone Tools  12 / 50"
-var _prev_tech_name: String   = ""     # detect unlock transitions
-var _notify_lbl: Label        = null   # unlock banner
-var _notify_timer: float      = 0.0   # seconds remaining for banner
+# Chat bubbles — two timers per citizen: gap (until next bubble), show (until bubble hides)
+var _chat_gap_timers: Array   = []
+var _chat_show_timers: Array  = []
+
+# Animal scene nodes
+var _animal_nodes: Array      = []
+
+# Notify banner
+var _notify_lbl: Label        = null
+var _notify_timer: float      = 0.0
 
 # Debug UI container (for dynamically adding citizen rows)
 var _debug_panel: VBoxContainer = null
@@ -54,11 +68,10 @@ func _ready() -> void:
 	_send_walkable_map()
 	_build_resources()
 	_build_citizens()
+	_build_animals()
 	_build_debug_ui()
-	_build_tech_ui()
 	_build_notify_label()
 	_build_bgm()
-	_prev_tech_name = _world_sim.get_next_tech_name()
 
 func _input(event: InputEvent) -> void:
 	if _cam == null:
@@ -92,6 +105,7 @@ func _process(delta: float) -> void:
 
 	_gather_time += delta
 	_animate_gathering()
+	_update_chat_bubbles(delta)
 
 	# Fade notify banner
 	if _notify_timer > 0.0:
@@ -229,6 +243,8 @@ func _build_citizens() -> void:
 		container.add_child(node)
 		_citizen_nodes.append(node)
 		_citizen_behaviors.append("idle")
+		_chat_gap_timers.append(randf_range(1.0, 4.0))
+		_chat_show_timers.append(0.0)
 		_sync_citizen_pos(i)
 
 func _make_citizen(cname: String, idx: int) -> CharacterBody3D:
@@ -285,7 +301,46 @@ func _make_citizen(cname: String, idx: int) -> CharacterBody3D:
 	body.add_child(beh_lbl)
 	body.set_meta("beh_lbl", beh_lbl)
 
+	# Chat bubble label (billboard) — above behavior label
+	var chat_lbl := Label3D.new()
+	chat_lbl.text = ""
+	chat_lbl.font_size = 24
+	chat_lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	chat_lbl.position.y = 1.85
+	chat_lbl.modulate = Color(1.0, 1.0, 0.75)
+	chat_lbl.visible = false
+	body.add_child(chat_lbl)
+	body.set_meta("chat_lbl", chat_lbl)
+
 	return body
+
+func _build_animals() -> void:
+	var container := Node3D.new()
+	container.name = "Animals"
+	add_child(container)
+	var count: int = _world_sim.get_animal_count()
+	for i in range(count):
+		var anode := _make_deer()
+		container.add_child(anode)
+		_animal_nodes.append(anode)
+	_update_animals()
+
+func _make_deer() -> Node3D:
+	var root := Node3D.new()
+	root.name = "Deer"
+
+	var mesh_inst := MeshInstance3D.new()
+	var sphere := SphereMesh.new()
+	sphere.radius = 0.25
+	sphere.height = 0.5
+	mesh_inst.mesh = sphere
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.72, 0.50, 0.28)  # tan/brown
+	mesh_inst.material_override = mat
+	mesh_inst.position.y = 0.25
+	root.add_child(mesh_inst)
+
+	return root
 
 func _build_debug_ui() -> void:
 	var layer := CanvasLayer.new()
@@ -355,40 +410,17 @@ func _show_notify(msg: String) -> void:
 	_notify_lbl.visible = true
 	_notify_timer = 3.5
 
-func _build_tech_ui() -> void:
-	var layer := CanvasLayer.new()
-	layer.name = "TechUI"
-	add_child(layer)
-
-	var panel := VBoxContainer.new()
-	panel.name = "TechPanel"
-	panel.set_anchor_and_offset(SIDE_RIGHT, 1.0, -210.0)
-	panel.set_anchor_and_offset(SIDE_TOP, 0.0, 10.0)
-	layer.add_child(panel)
-
-	var title := Label.new()
-	title.text = "Research"
-	title.add_theme_color_override("font_color", Color(1.0, 0.9, 0.5))
-	panel.add_child(title)
-
-	_tech_lbl = Label.new()
-	_tech_lbl.text = "—"
-	panel.add_child(_tech_lbl)
-
-	_tech_bar = ProgressBar.new()
-	_tech_bar.min_value = 0.0
-	_tech_bar.max_value = 1.0
-	_tech_bar.value = 0.0
-	_tech_bar.custom_minimum_size = Vector2(200, 20)
-	_tech_bar.modulate = Color(1.0, 0.85, 0.2)
-	_tech_bar.show_percentage = false
-	panel.add_child(_tech_bar)
-
 # ── Per-tick updates ──────────────────────────────────────────────────────────
 
 func _sync_citizen_pos(idx: int) -> void:
 	var tile: Vector2i = _world_sim.get_citizen_tile_pos(idx)
-	_citizen_nodes[idx].position = tile_to_world(tile.x, tile.y)
+	var base: Vector3 = tile_to_world(tile.x, tile.y)
+	# Golden angle offset prevents overlap when multiple citizens share a tile
+	const GOLDEN_ANGLE := 2.399963  # radians ≈ 137.5°
+	const OFFSET_RADIUS := 0.28
+	var angle := idx * GOLDEN_ANGLE
+	var offset := Vector3(cos(angle) * OFFSET_RADIUS, 0.0, sin(angle) * OFFSET_RADIUS)
+	_citizen_nodes[idx].position = base + offset
 
 func _update_citizens() -> void:
 	for i in range(_citizen_nodes.size()):
@@ -415,8 +447,8 @@ func _update_citizens() -> void:
 		_hyd_bars[i].value = hyd
 
 	_update_resources()
+	_update_animals()
 	_update_day_night()
-	_update_tech_ui()
 
 func _update_day_night() -> void:
 	var tick: int = _world_sim.get_tick_count()
@@ -439,38 +471,51 @@ func _check_births() -> void:
 		citizens_container.add_child(node)
 		_citizen_nodes.append(node)
 		_citizen_behaviors.append("idle")
+		_chat_gap_timers.append(randf_range(1.0, 4.0))
+		_chat_show_timers.append(0.0)
 		_sync_citizen_pos(idx)
 		_add_debug_row(cname)
 		_show_notify("New citizen born: " + cname + "!")
-
-func _update_tech_ui() -> void:
-	if _tech_lbl == null or _tech_bar == null:
-		return
-	var pts: int     = _world_sim.get_research_points()
-	var tech_name: String = _world_sim.get_next_tech_name()
-	var req: int     = _world_sim.get_next_tech_required()
-
-	# Detect unlock: previous name was non-empty and is now gone or different
-	if _prev_tech_name != "" and tech_name != _prev_tech_name:
-		var unlocked_name := _prev_tech_name.replace("_", " ").capitalize()
-		_show_notify("Tech unlocked: " + unlocked_name + "!")
-	_prev_tech_name = tech_name
-
-	if tech_name == "":
-		_tech_lbl.text  = "All techs unlocked!"
-		_tech_bar.value = 1.0
-	else:
-		_tech_lbl.text  = "%s  %d / %d" % [tech_name.replace("_", " ").capitalize(), pts, req]
-		_tech_bar.max_value = float(req) if req > 0 else 1.0
-		_tech_bar.value     = float(pts)
 
 func _update_resources() -> void:
 	var count: int = _world_sim.get_resource_count()
 	for i in range(count):
 		var qty: float = _world_sim.get_resource_quantity(i)
-		# berry_bush shrinks as it depletes; water_source stays full
-		var s := maxf(0.15, qty)
-		_resource_meshes[i].scale = Vector3(s, s, s)
+		if qty <= 0.0:
+			_resource_meshes[i].visible = false
+		else:
+			_resource_meshes[i].visible = true
+			_resource_meshes[i].scale = Vector3(qty, qty, qty)
+
+func _update_animals() -> void:
+	var count: int = _world_sim.get_animal_count()
+	for i in range(count):
+		var alive: bool = _world_sim.get_animal_alive(i)
+		_animal_nodes[i].visible = alive
+		if alive:
+			var tile: Vector2i = _world_sim.get_animal_pos(i)
+			_animal_nodes[i].position = tile_to_world(tile.x, tile.y)
+
+func _update_chat_bubbles(delta: float) -> void:
+	for i in range(_citizen_nodes.size()):
+		# Count down display timer — hide bubble when expired
+		if _chat_show_timers[i] > 0.0:
+			_chat_show_timers[i] -= delta
+			if _chat_show_timers[i] <= 0.0:
+				var chat_lbl: Label3D = _citizen_nodes[i].get_meta("chat_lbl")
+				chat_lbl.visible = false
+
+		# Count down gap timer — show a new bubble when expired
+		if _chat_gap_timers[i] > 0.0:
+			_chat_gap_timers[i] -= delta
+			if _chat_gap_timers[i] <= 0.0:
+				var beh: String = _citizen_behaviors[i]
+				var lines: Array = CHAT_LINES.get(beh, ["..."])
+				var chat_lbl: Label3D = _citizen_nodes[i].get_meta("chat_lbl")
+				chat_lbl.text = lines[randi() % lines.size()]
+				chat_lbl.visible = true
+				_chat_show_timers[i] = 2.5
+				_chat_gap_timers[i] = randf_range(4.0, 9.0)
 
 func _animate_gathering() -> void:
 	for i in range(_citizen_nodes.size()):
@@ -487,4 +532,5 @@ func _behavior_color(b: String) -> Color:
 		"gathering":     return Color(0.2, 0.9, 0.2)
 		"seeking_water": return Color(0.3, 0.6, 1.0)
 		"drinking":      return Color(0.5, 0.85, 1.0)
+		"hunting":       return Color(0.9, 0.2, 0.2)
 	return Color(0.7, 0.7, 0.7)

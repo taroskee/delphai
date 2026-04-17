@@ -8,6 +8,8 @@ pub enum BehaviorState {
     Gathering,
     SeekingWater,
     Drinking,
+    /// Pursuing an animal for cooperative hunting. Transitions to Idle when fed.
+    Hunting,
 }
 
 impl BehaviorState {
@@ -18,6 +20,7 @@ impl BehaviorState {
             BehaviorState::Gathering => "gathering",
             BehaviorState::SeekingWater => "seeking_water",
             BehaviorState::Drinking => "drinking",
+            BehaviorState::Hunting => "hunting",
         }
     }
 }
@@ -76,6 +79,14 @@ pub fn tick(state: BehaviorState, needs: &Needs) -> BehaviorAction {
         BehaviorState::Idle => {
             if needs.fed < FED_SEEK_THRESHOLD {
                 BehaviorAction::TransitionTo(BehaviorState::SeekingFood)
+            } else {
+                BehaviorAction::Stay
+            }
+        }
+
+        BehaviorState::Hunting => {
+            if needs.fed >= FED_SATED {
+                BehaviorAction::TransitionTo(BehaviorState::Idle)
             } else {
                 BehaviorAction::Stay
             }

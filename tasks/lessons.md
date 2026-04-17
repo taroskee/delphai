@@ -24,13 +24,6 @@
 - 対策: bench クレートには `src/lib.rs` を置かない。bench 共通コードは `benches/` 直下に置く
 - CLAUDE.md反映: 未
 
-### [2026-04] [LLM] gemma2:2b は `action: null` を出力しプロンプトで修正不可
-
-- 状況: gemma2:2b が structured output で `action` フィールドを常に null で返す
-- 原因: モデルの世代が古く、JSON Schema 強制でも指示無視が発生する
-- 対策: LLMモデル選定時は必ず structured output の null 返し率を計測してから採用判断する。世代が古いモデルは早期除外
-- CLAUDE.md反映: 未
-
 ### [2026-04] [LLM] JSON 末尾カンマで parse 失敗 → YAML で解消
 
 - 状況: crisis シナリオで E2B が JSON 末尾カンマを出力し 1/3 しか適合しない
@@ -52,9 +45,9 @@
 - 対策: `append_memory()` ヘルパーで最新 N エントリに制限する。初期値は 8。新しい記憶追加箇所を実装するたびに必ず上限を設ける
 - CLAUDE.md反映: 未
 
-### [2026-04] [Rust] 会話ペア選出がリスト先頭固定になり特定住民が会話独占
+### [2026-04] [macOS] unsigned dylib で Godot が Code Signature Invalid クラッシュ
 
-- 状況: Kael と Elder が常にペアになり Hara が会話に参加しない
-- 原因: idle 市民リストを順番に走査するため、最初の近接ペア（インデックス 0-1）が毎回当選する
-- 対策: `random_roll` でリストをローテーションしてから走査する。リスト順に依存するペア選出を書く場合は必ずランダム性を注入する
+- 状況: `make build-mac` 後に Godot を起動すると即座にクラッシュ。`EXC_BAD_ACCESS (SIGKILL - Code Signature Invalid)` / `Termination: CODESIGNING Code 2`
+- 原因: macOS 26.4 (Tahoe) から dyld が unsigned な dylib のロードを拒否するようになった。`cargo build` は署名なし dylib を生成する
+- 対策: `Makefile` の `build-mac` / `build-mac-release` ターゲットに `codesign --force --sign -` を追加してアドホック署名する。Apple Developer cert 不要でローカル開発では十分
 - CLAUDE.md反映: 未

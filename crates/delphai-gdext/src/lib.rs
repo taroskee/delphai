@@ -4,6 +4,7 @@
 
 use delphai_core::{
     agent::citizen::{Citizen, Emotion},
+    animal::Animal,
     llm::{
         prompt::{build_conversation_prompt, ConversationPromptInput, WorldContext},
         provider::CitizenResponse,
@@ -69,6 +70,10 @@ impl WorldNode {
         world.add_resource(Resource::berry_bush(TilePos::new(15, 10)));
         world.add_resource(Resource::berry_bush(TilePos::new(10, 2)));
         world.add_resource(Resource::water_source(TilePos::new(20, 3)));
+
+        // Seed two deer on opposite sides of the map.
+        world.add_animal(Animal::deer(TilePos::new(4, 3)));
+        world.add_animal(Animal::deer(TilePos::new(18, 11)));
 
         self.world = Some(world);
     }
@@ -246,6 +251,33 @@ impl WorldNode {
             }
         }
         false
+    }
+
+    // -------------------------------------------------------------------------
+    // Animals
+    // -------------------------------------------------------------------------
+
+    #[func]
+    fn get_animal_count(&self) -> i64 {
+        self.world.as_ref().map_or(0, |w| w.animals.len() as i64)
+    }
+
+    #[func]
+    fn get_animal_pos(&self, idx: i64) -> Vector2i {
+        self.world
+            .as_ref()
+            .and_then(|w| w.animals.get(idx as usize))
+            .map(|a| Vector2i::new(a.pos.x as i32, a.pos.y as i32))
+            .unwrap_or_default()
+    }
+
+    #[func]
+    fn get_animal_alive(&self, idx: i64) -> bool {
+        self.world
+            .as_ref()
+            .and_then(|w| w.animals.get(idx as usize))
+            .map(|a| a.alive)
+            .unwrap_or(false)
     }
 
     // -------------------------------------------------------------------------

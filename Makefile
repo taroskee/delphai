@@ -10,13 +10,15 @@ build-mac:
 	cargo build -p delphai-gdext
 	mkdir -p prebuilt/macos/debug prebuilt/macos/release
 	cp target/debug/libdelphai_gdext.dylib prebuilt/macos/debug/
-	@echo "dylib copied to prebuilt/macos/debug/ — restart Godot to reload"
+	codesign --force --sign - prebuilt/macos/debug/libdelphai_gdext.dylib
+	@echo "dylib copied and ad-hoc signed — restart Godot to reload"
 
 build-mac-release:
 	cargo build -p delphai-gdext --release
 	mkdir -p prebuilt/macos/release
 	cp target/release/libdelphai_gdext.dylib prebuilt/macos/release/
-	@echo "release dylib copied to prebuilt/macos/release/"
+	codesign --force --sign - prebuilt/macos/release/libdelphai_gdext.dylib
+	@echo "release dylib copied and ad-hoc signed"
 
 build: build-linux
 
