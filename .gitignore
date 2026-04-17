@@ -4,6 +4,7 @@
 **/.DS_Store
 **/*.log
 **/assets/**
+!**/assets/inventry.md
 **/__pycache__
 
 # Claude Code local data (plans, memory — developer-specific)
