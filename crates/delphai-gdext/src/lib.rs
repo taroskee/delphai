@@ -65,15 +65,17 @@ impl WorldNode {
             }
         }
 
-        // Seed some resources — positions adjusted when real map is available.
+        // Seed some resources.  Positions aligned with terrain map (see world.gd _get_terrain):
+        //   berry bushes land on walkable tiles in forest zones.
+        //   water_source is on the shallow-river column (col 17).
         world.add_resource(Resource::berry_bush(TilePos::new(5, 5)));
         world.add_resource(Resource::berry_bush(TilePos::new(15, 10)));
         world.add_resource(Resource::berry_bush(TilePos::new(10, 2)));
-        world.add_resource(Resource::water_source(TilePos::new(20, 3)));
+        world.add_resource(Resource::water_source(TilePos::new(17, 7)));
 
-        // Seed two deer on opposite sides of the map.
+        // Deer: left side in forest, right side past the river.
         world.add_animal(Animal::deer(TilePos::new(4, 3)));
-        world.add_animal(Animal::deer(TilePos::new(18, 11)));
+        world.add_animal(Animal::deer(TilePos::new(21, 11)));
 
         self.world = Some(world);
     }

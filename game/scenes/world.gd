@@ -11,6 +11,16 @@ const CAM_ZOOM_MIN := 12.0
 const CAM_ZOOM_MAX := 60.0
 const CAM_PAN_SPEED := 0.05
 
+# Terrain types
+const T_GROUND   := 0
+const T_FOREST   := 1
+const T_SHALLOW  := 2
+const T_DEEP     := 3
+const T_MOUNTAIN := 4
+
+const CITIZEN_LERP_SPEED := 8.0   # tiles/sec visual lerp
+const ANIMAL_LERP_SPEED  := 6.0
+
 # Citizen chat bubble lines (Japanese) keyed by behavior state
 const CHAT_LINES := {
 	"idle":          ["のんびり...", "いい天気だ", "休憩しよう", "静かだな", "平和だな"],
@@ -36,6 +46,10 @@ var _chat_show_timers: Array  = []
 
 # Animal scene nodes
 var _animal_nodes: Array      = []
+
+# Smooth movement targets (updated each tick, lerped in _process)
+var _citizen_target_pos: Array = []
+var _animal_target_pos: Array  = []
 
 # Notify banner
 var _notify_lbl: Label        = null
@@ -103,6 +117,15 @@ func _process(delta: float) -> void:
 		_update_citizens()
 		_check_births()
 
+	# Smooth movement — lerp visual positions toward simulation targets
+	var c_lerp := clampf(CITIZEN_LERP_SPEED * delta, 0.0, 1.0)
+	for i in range(_citizen_nodes.size()):
+		_citizen_nodes[i].position = _citizen_nodes[i].position.lerp(_citizen_target_pos[i], c_lerp)
+	var a_lerp := clampf(ANIMAL_LERP_SPEED * delta, 0.0, 1.0)
+	for i in range(_animal_nodes.size()):
+		if _animal_nodes[i].visible:
+			_animal_nodes[i].position = _animal_nodes[i].position.lerp(_animal_target_pos[i], a_lerp)
+
 	_gather_time += delta
 	_animate_gathering()
 	_update_chat_bubbles(delta)
@@ -122,6 +145,29 @@ func tile_to_world(col: int, row: int) -> Vector3:
 
 func _map_center() -> Vector3:
 	return Vector3((MAP_WIDTH - 1) * 0.5 * TILE_SIZE, 0.0, (MAP_HEIGHT - 1) * 0.5 * TILE_SIZE)
+
+func _get_terrain(col: int, row: int) -> int:
+	# Border wall
+	if col == 0 or col == MAP_WIDTH - 1 or row == 0 or row == MAP_HEIGHT - 1:
+		return T_MOUNTAIN
+	# Interior mountain cluster (top-left corner)
+	if col <= 4 and row <= 4 and col + row <= 6:
+		return T_MOUNTAIN
+	# River: col 18 = deep water, col 17 and 19 = shallow water
+	if row >= 1 and row <= MAP_HEIGHT - 2:
+		if col == 18:
+			return T_DEEP
+		if col == 17 or col == 19:
+			return T_SHALLOW
+	# Forest A: upper-left interior
+	if col >= 3 and col <= 10 and row >= 1 and row <= 6:
+		if (col * 17 + row * 31) % 4 < 3:
+			return T_FOREST
+	# Forest B: lower-right interior (left of river)
+	if col >= 12 and col <= 16 and row >= 7 and row <= 12:
+		if (col * 13 + row * 23) % 4 < 3:
+			return T_FOREST
+	return T_GROUND
 
 # ── Scene builders ────────────────────────────────────────────────────────────
 
@@ -186,10 +232,86 @@ func _build_terrain() -> void:
 	col_shape.position = _map_center()
 	body.add_child(col_shape)
 
+	_build_terrain_features()
+
+func _build_terrain_features() -> void:
+	var container := Node3D.new()
+	container.name = "TerrainFeatures"
+	add_child(container)
+	for row in range(MAP_HEIGHT):
+		for col in range(MAP_WIDTH):
+			var t := _get_terrain(col, row)
+			var wpos := tile_to_world(col, row)
+			match t:
+				T_MOUNTAIN:
+					_add_mountain(container, wpos)
+				T_FOREST:
+					_add_tree(container, wpos)
+				T_SHALLOW:
+					_add_water_plane(container, wpos, Color(0.3, 0.65, 0.95, 0.72))
+				T_DEEP:
+					_add_water_plane(container, wpos, Color(0.05, 0.18, 0.72, 0.88))
+
+func _add_mountain(parent: Node3D, pos: Vector3) -> void:
+	var mi := MeshInstance3D.new()
+	var cyl := CylinderMesh.new()
+	cyl.top_radius    = 0.0
+	cyl.bottom_radius = TILE_SIZE * 0.48
+	cyl.height        = TILE_SIZE * 0.85
+	mi.mesh = cyl
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.54, 0.51, 0.49)
+	mi.material_override = mat
+	mi.position = pos + Vector3(0, TILE_SIZE * 0.425, 0)
+	parent.add_child(mi)
+
+func _add_tree(parent: Node3D, pos: Vector3) -> void:
+	var root := Node3D.new()
+	root.position = pos
+	# Trunk
+	var trunk_mi := MeshInstance3D.new()
+	var trunk := CylinderMesh.new()
+	trunk.top_radius    = 0.08
+	trunk.bottom_radius = 0.12
+	trunk.height        = 0.55
+	trunk_mi.mesh = trunk
+	var trunk_mat := StandardMaterial3D.new()
+	trunk_mat.albedo_color = Color(0.40, 0.26, 0.12)
+	trunk_mi.material_override = trunk_mat
+	trunk_mi.position.y = 0.28
+	root.add_child(trunk_mi)
+	# Canopy
+	var canopy_mi := MeshInstance3D.new()
+	var canopy := SphereMesh.new()
+	canopy.radius = 0.48
+	canopy.height = 0.96
+	canopy_mi.mesh = canopy
+	var canopy_mat := StandardMaterial3D.new()
+	canopy_mat.albedo_color = Color(0.13, 0.46, 0.11)
+	canopy_mi.material_override = canopy_mat
+	canopy_mi.position.y = 0.9
+	root.add_child(canopy_mi)
+	parent.add_child(root)
+
+func _add_water_plane(parent: Node3D, pos: Vector3, color: Color) -> void:
+	var mi := MeshInstance3D.new()
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(TILE_SIZE * 0.98, TILE_SIZE * 0.98)
+	mi.mesh = plane
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = color
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mi.material_override = mat
+	mi.position = pos + Vector3(0, 0.01, 0)
+	parent.add_child(mi)
+
 func _send_walkable_map() -> void:
 	var data := PackedByteArray()
 	data.resize(MAP_WIDTH * MAP_HEIGHT)
-	data.fill(1)  # all tiles walkable for now
+	for row in range(MAP_HEIGHT):
+		for col in range(MAP_WIDTH):
+			var t := _get_terrain(col, row)
+			data[row * MAP_WIDTH + col] = 0 if (t == T_DEEP or t == T_MOUNTAIN) else 1
 	_world_sim.set_walkable_map(data, MAP_WIDTH, MAP_HEIGHT)
 
 func _build_resources() -> void:
@@ -245,74 +367,80 @@ func _build_citizens() -> void:
 		_citizen_behaviors.append("idle")
 		_chat_gap_timers.append(randf_range(1.0, 4.0))
 		_chat_show_timers.append(0.0)
+		_citizen_target_pos.append(Vector3.ZERO)
 		_sync_citizen_pos(i)
+		node.position = _citizen_target_pos[i]  # snap to start position
 
-func _make_citizen(cname: String, idx: int) -> CharacterBody3D:
-	var body := CharacterBody3D.new()
-	body.name = "Citizen_%d" % idx
+func _make_citizen(cname: String, idx: int) -> Node3D:
+	var root := Node3D.new()
+	root.name = "Citizen_%d" % idx
 
-	# Capsule visual
-	var mesh_inst := MeshInstance3D.new()
-	var cap := CapsuleMesh.new()
-	cap.radius = 0.2
-	cap.height = 0.8
-	mesh_inst.mesh = cap
-	mesh_inst.position.y = 0.5
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = Color(0.85, 0.65, 0.35)
-	mesh_inst.material_override = mat
-	body.add_child(mesh_inst)
-	body.set_meta("mat", mat)
+	root.set_meta("mat", mat)
 
-	# Head sphere (simple humanoid silhouette)
-	var head_inst := MeshInstance3D.new()
+	# Chess pawn — base disc
+	var base_mi := MeshInstance3D.new()
+	var base_cyl := CylinderMesh.new()
+	base_cyl.top_radius    = 0.22
+	base_cyl.bottom_radius = 0.26
+	base_cyl.height        = 0.10
+	base_mi.mesh = base_cyl
+	base_mi.material_override = mat
+	base_mi.position.y = 0.05
+	root.add_child(base_mi)
+
+	# Chess pawn — body pillar
+	var body_mi := MeshInstance3D.new()
+	var body_cyl := CylinderMesh.new()
+	body_cyl.top_radius    = 0.13
+	body_cyl.bottom_radius = 0.18
+	body_cyl.height        = 0.55
+	body_mi.mesh = body_cyl
+	body_mi.material_override = mat
+	body_mi.position.y = 0.38
+	root.add_child(body_mi)
+
+	# Chess pawn — head sphere
+	var head_mi := MeshInstance3D.new()
 	var head_sphere := SphereMesh.new()
-	head_sphere.radius = 0.14
-	head_sphere.height = 0.28
-	head_inst.mesh = head_sphere
-	head_inst.position.y = 1.0
-	head_inst.material_override = mat
-	body.add_child(head_inst)
+	head_sphere.radius = 0.18
+	head_sphere.height = 0.36
+	head_mi.mesh = head_sphere
+	head_mi.material_override = mat
+	head_mi.position.y = 0.82
+	root.add_child(head_mi)
 
-	# Collision shape
-	var col := CollisionShape3D.new()
-	var cap_shape := CapsuleShape3D.new()
-	cap_shape.radius = 0.2
-	cap_shape.height = 0.4
-	col.shape = cap_shape
-	col.position.y = 0.5
-	body.add_child(col)
-
-	# Name label (billboard) — above head sphere (head top at ~y=1.14)
+	# Name label (billboard)
 	var name_lbl := Label3D.new()
 	name_lbl.text = cname
 	name_lbl.font_size = 28
 	name_lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	name_lbl.position.y = 1.35
-	body.add_child(name_lbl)
+	name_lbl.position.y = 1.15
+	root.add_child(name_lbl)
 
 	# Behavior label (billboard)
 	var beh_lbl := Label3D.new()
 	beh_lbl.text = "idle"
 	beh_lbl.font_size = 22
 	beh_lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	beh_lbl.position.y = 1.6
+	beh_lbl.position.y = 1.4
 	beh_lbl.modulate = Color(0.9, 0.9, 0.9)
-	body.add_child(beh_lbl)
-	body.set_meta("beh_lbl", beh_lbl)
+	root.add_child(beh_lbl)
+	root.set_meta("beh_lbl", beh_lbl)
 
-	# Chat bubble label (billboard) — above behavior label
+	# Chat bubble label (billboard)
 	var chat_lbl := Label3D.new()
 	chat_lbl.text = ""
 	chat_lbl.font_size = 24
 	chat_lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	chat_lbl.position.y = 1.85
+	chat_lbl.position.y = 1.65
 	chat_lbl.modulate = Color(1.0, 1.0, 0.75)
 	chat_lbl.visible = false
-	body.add_child(chat_lbl)
-	body.set_meta("chat_lbl", chat_lbl)
+	root.add_child(chat_lbl)
+	root.set_meta("chat_lbl", chat_lbl)
 
-	return body
+	return root
 
 func _build_animals() -> void:
 	var container := Node3D.new()
@@ -323,7 +451,11 @@ func _build_animals() -> void:
 		var anode := _make_deer()
 		container.add_child(anode)
 		_animal_nodes.append(anode)
+		_animal_target_pos.append(Vector3.ZERO)
 	_update_animals()
+	# Snap animal positions to their initial targets
+	for i in range(_animal_nodes.size()):
+		_animal_nodes[i].position = _animal_target_pos[i]
 
 func _make_deer() -> Node3D:
 	var root := Node3D.new()
@@ -420,7 +552,7 @@ func _sync_citizen_pos(idx: int) -> void:
 	const OFFSET_RADIUS := 0.28
 	var angle := idx * GOLDEN_ANGLE
 	var offset := Vector3(cos(angle) * OFFSET_RADIUS, 0.0, sin(angle) * OFFSET_RADIUS)
-	_citizen_nodes[idx].position = base + offset
+	_citizen_target_pos[idx] = base + offset
 
 func _update_citizens() -> void:
 	for i in range(_citizen_nodes.size()):
@@ -473,7 +605,9 @@ func _check_births() -> void:
 		_citizen_behaviors.append("idle")
 		_chat_gap_timers.append(randf_range(1.0, 4.0))
 		_chat_show_timers.append(0.0)
+		_citizen_target_pos.append(Vector3.ZERO)
 		_sync_citizen_pos(idx)
+		node.position = _citizen_target_pos[idx]  # snap to birth tile
 		_add_debug_row(cname)
 		_show_notify("New citizen born: " + cname + "!")
 
@@ -503,11 +637,12 @@ func _update_animals() -> void:
 			tween.tween_property(mat, "albedo_color:a", 0.0, 0.6)
 			tween.tween_callback(func(): anode.visible = false)
 		elif alive:
-			# Deer is alive — make sure it is visible.
+			# Update smooth movement target.
 			var tile: Vector2i = _world_sim.get_animal_pos(i)
-			anode.position = tile_to_world(tile.x, tile.y)
+			_animal_target_pos[i] = tile_to_world(tile.x, tile.y)
 			if not anode.visible:
-				# Just respawned — fade in from transparent.
+				# Just respawned — snap position then fade in from transparent.
+				anode.position = _animal_target_pos[i]
 				var mesh_inst: MeshInstance3D = anode.get_child(0) as MeshInstance3D
 				var mat: StandardMaterial3D = mesh_inst.material_override as StandardMaterial3D
 				mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
