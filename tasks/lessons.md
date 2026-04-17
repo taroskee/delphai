@@ -45,6 +45,13 @@
 - 対策: `append_memory()` ヘルパーで最新 N エントリに制限する。初期値は 8。新しい記憶追加箇所を実装するたびに必ず上限を設ける
 - CLAUDE.md反映: 未
 
+### [2026-04] [Godot3D] TILE_SIZE=1.0 だとカメラ高さ18でマップが画面に対して小さく見える
+
+- 状況: 24×14 タイルのマップが画面中央に小さく表示され、世界感が出ない
+- 原因: TILE_SIZE=1.0（1ユニット/タイル）に対してカメラ高さ18はズームアウトしすぎ。逆にズームインするとパン操作が重くなる
+- 対策: TILE_SIZE を倍（2.0）にする。カメラ高さ・ZOOM範囲・スクロールステップ・パンスケール係数をすべて2倍に合わせる。ゲームロジック（Rust側タイル座標）は変更不要
+- CLAUDE.md反映: 未
+
 ### [2026-04] [macOS] unsigned dylib で Godot が Code Signature Invalid クラッシュ
 
 - 状況: `make build-mac` 後に Godot を起動すると即座にクラッシュ。`EXC_BAD_ACCESS (SIGKILL - Code Signature Invalid)` / `Termination: CODESIGNING Code 2`

@@ -2,14 +2,14 @@ extends Node3D
 
 ## Main 3D scene: drives Rust simulation, builds world geometry, syncs citizens each tick.
 
-const TILE_SIZE    := 1.0
+const TILE_SIZE    := 2.0    # world units per tile (increased from 1.0 for more screen coverage)
 const MAP_WIDTH    := 24
 const MAP_HEIGHT   := 14
 const TICK_RATE    := 4.0    # ticks per second
 const DAY_TICKS    := 600    # one full day cycle in ticks (~2.5 min at 4 Hz)
-const CAM_ZOOM_MIN := 6.0
-const CAM_ZOOM_MAX := 30.0
-const CAM_PAN_SPEED := 0.025
+const CAM_ZOOM_MIN := 12.0
+const CAM_ZOOM_MAX := 60.0
+const CAM_PAN_SPEED := 0.05
 
 # Citizen chat bubble lines (Japanese) keyed by behavior state
 const CHAT_LINES := {
@@ -84,14 +84,14 @@ func _input(event: InputEvent) -> void:
 				_cam_drag_start = btn.position
 				_cam_pos_start  = _cam.position
 		elif btn.button_index == MOUSE_BUTTON_WHEEL_UP:
-			_cam.position.y = clampf(_cam.position.y - 1.5, CAM_ZOOM_MIN, CAM_ZOOM_MAX)
+			_cam.position.y = clampf(_cam.position.y - 3.0, CAM_ZOOM_MIN, CAM_ZOOM_MAX)
 		elif btn.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			_cam.position.y = clampf(_cam.position.y + 1.5, CAM_ZOOM_MIN, CAM_ZOOM_MAX)
+			_cam.position.y = clampf(_cam.position.y + 3.0, CAM_ZOOM_MIN, CAM_ZOOM_MAX)
 	elif event is InputEventMouseMotion and _cam_dragging:
 		var motion := event as InputEventMouseMotion
 		var delta_px := motion.position - _cam_drag_start
 		# Scale pan by current zoom height so speed feels consistent
-		var zoom_scale := _cam.position.y / 18.0
+		var zoom_scale := _cam.position.y / 36.0
 		_cam.position.x = _cam_pos_start.x - delta_px.x * CAM_PAN_SPEED * zoom_scale
 		_cam.position.z = _cam_pos_start.z - delta_px.y * CAM_PAN_SPEED * zoom_scale
 
@@ -150,7 +150,7 @@ func _build_camera() -> void:
 	_cam = Camera3D.new()
 	_cam.name = "Camera3D"
 	var c := _map_center()
-	_cam.position = Vector3(c.x, 18.0, c.z + 10.0)
+	_cam.position = Vector3(c.x, 36.0, c.z + 20.0)
 	_cam.rotation_degrees = Vector3(-55.0, 0.0, 0.0)
 	add_child(_cam)
 
