@@ -33,7 +33,7 @@ Thinking, coding and git-commiting in English
 
 ## TODO
 
-Plan Modeの計画は`@tasks/todo.md`に簡潔に記述
+計画した内容は必ず`@tasks/todo.md`に簡潔に記述
 完了したTODOは必ずチェックをつける
 
 ## 自己改善

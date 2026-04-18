@@ -1,8 +1,8 @@
-/// RCT/openRCT2-inspired tile-based pathfinding.
-///
-/// Uses local one-step decisions (not full A*): each tick, pick the walkable
-/// neighbour closest to the goal, penalising tiles in the recent history buffer
-/// to prevent loops. Stuck detection triggers a random-direction escape.
+//! RCT/openRCT2-inspired tile-based pathfinding.
+//!
+//! Uses local one-step decisions (not full A*): each tick, pick the walkable
+//! neighbour closest to the goal, penalising tiles in the recent history buffer
+//! to prevent loops. Stuck detection triggers a random-direction escape.
 
 pub const HISTORY_LEN: usize = 16;
 /// Ticks a citizen waits between steps (controls walking speed).

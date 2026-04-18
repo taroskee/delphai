@@ -1,24 +1,36 @@
 extends Node3D
 
-## Main 3D scene: drives Rust simulation, builds world geometry, syncs citizens each tick.
+## Thin orchestrator: drives the Rust simulation and wires together the helper
+## builders (TerrainBuilder, CitizenFactory, AnimalFactory, ResourceFactory,
+## DebugHud) each tick. Heavy construction logic lives in `game/scripts/*.gd`.
 
-const TILE_SIZE    := 2.0    # world units per tile (increased from 1.0 for more screen coverage)
+const TILE_SIZE    := 2.0
 const MAP_WIDTH    := 24
 const MAP_HEIGHT   := 14
 const TICK_RATE    := 4.0    # ticks per second
 const DAY_TICKS    := 600    # one full day cycle in ticks (~2.5 min at 4 Hz)
-const CAM_ZOOM_MIN := 12.0
-const CAM_ZOOM_MAX := 60.0
+const CAM_ZOOM_MIN := 10.0
+const CAM_ZOOM_MAX := 200.0
+const CAM_ZOOM_DEFAULT := 22.0
 const CAM_PAN_SPEED := 0.05
+const CAM_KEY_PAN_SPEED := 24.0    # world units per second
+const CAM_KEY_ZOOM_SPEED := 20.0   # world units per second
+const CAM_WHEEL_ZOOM_STEP := 2.5
+const CAM_PINCH_ZOOM_GAIN := 18.0
+const CAM_TRACKPAD_PAN_GAIN := 0.05
+# Velocity-based drag acceleration: slow drag = 1x, fast drag (>= REF_PX px/s) = MAX x.
+const CAM_DRAG_ACCEL_MAX    := 4.0
+const CAM_DRAG_ACCEL_REF_PX := 1500.0
+# Keyboard pan acceleration: hold-time ramps multiplier up to MAX at RAMP per second.
+const CAM_KEY_ACCEL_MAX  := 3.0
+const CAM_KEY_ACCEL_RAMP := 1.5
 
-# Terrain types
-const T_GROUND   := 0
-const T_FOREST   := 1
-const T_SHALLOW  := 2
-const T_DEEP     := 3
-const T_MOUNTAIN := 4
+# Village center tile — matches the citizen cluster spawn in
+# `crates/delphai-gdext/src/lib.rs::initialize`. Camera and landmarks focus here.
+const VILLAGE_CENTER_COL := 10
+const VILLAGE_CENTER_ROW := 8
 
-const CITIZEN_LERP_SPEED := 8.0   # tiles/sec visual lerp
+const CITIZEN_LERP_SPEED := 8.0
 const ANIMAL_LERP_SPEED  := 6.0
 
 # Citizen chat bubble lines (Japanese) keyed by behavior state
@@ -33,38 +45,30 @@ const CHAT_LINES := {
 
 var _world_sim: WorldNode
 var _citizen_nodes: Array     = []
-var _citizen_behaviors: Array = []  # cached behavior string per citizen
-var _resource_meshes: Array   = []  # MeshInstance3D per resource (for scale updates)
+var _citizen_behaviors: Array = []
+var _resource_meshes: Array   = []
 var _fed_bars: Array          = []
 var _hyd_bars: Array          = []
 var _tick_acc: float          = 0.0
 var _gather_time: float       = 0.0
 
-# Chat bubbles — two timers per citizen: gap (until next bubble), show (until bubble hides)
 var _chat_gap_timers: Array   = []
 var _chat_show_timers: Array  = []
 
-# Animal scene nodes
 var _animal_nodes: Array      = []
 
-# Smooth movement targets (updated each tick, lerped in _process)
 var _citizen_target_pos: Array = []
 var _animal_target_pos: Array  = []
 
-# Notify banner
 var _notify_lbl: Label        = null
 var _notify_timer: float      = 0.0
 
-# Debug UI container (for dynamically adding citizen rows)
 var _debug_panel: VBoxContainer = null
 
-# Camera rig
 var _cam: Camera3D            = null
 var _cam_dragging: bool       = false
-var _cam_drag_start: Vector2  = Vector2.ZERO
-var _cam_pos_start: Vector3   = Vector3.ZERO
+var _key_pan_hold: float      = 0.0
 
-# Day/night
 var _sun: DirectionalLight3D  = null
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
@@ -78,8 +82,10 @@ func _ready() -> void:
 	_build_environment()
 	_build_lighting()
 	_build_camera()
-	_build_terrain()
-	_send_walkable_map()
+	TerrainBuilder.build_ground(self, MAP_WIDTH, MAP_HEIGHT, TILE_SIZE)
+	TerrainBuilder.build_features(self, MAP_WIDTH, MAP_HEIGHT, TILE_SIZE)
+	_world_sim.set_walkable_map(TerrainBuilder.make_walkable_map(MAP_WIDTH, MAP_HEIGHT), MAP_WIDTH, MAP_HEIGHT)
+	VillageBuilder.add_campfire(self, tile_to_world(VILLAGE_CENTER_COL, VILLAGE_CENTER_ROW))
 	_build_resources()
 	_build_citizens()
 	_build_animals()
@@ -91,25 +97,69 @@ func _input(event: InputEvent) -> void:
 	if _cam == null:
 		return
 	if event is InputEventMouseButton:
-		var btn := event as InputEventMouseButton
-		if btn.button_index == MOUSE_BUTTON_MIDDLE:
-			_cam_dragging = btn.pressed
-			if btn.pressed:
-				_cam_drag_start = btn.position
-				_cam_pos_start  = _cam.position
-		elif btn.button_index == MOUSE_BUTTON_WHEEL_UP:
-			_cam.position.y = clampf(_cam.position.y - 3.0, CAM_ZOOM_MIN, CAM_ZOOM_MAX)
-		elif btn.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			_cam.position.y = clampf(_cam.position.y + 3.0, CAM_ZOOM_MIN, CAM_ZOOM_MAX)
+		_handle_mouse_button(event as InputEventMouseButton)
 	elif event is InputEventMouseMotion and _cam_dragging:
-		var motion := event as InputEventMouseMotion
-		var delta_px := motion.position - _cam_drag_start
-		# Scale pan by current zoom height so speed feels consistent
+		_handle_mouse_drag(event as InputEventMouseMotion)
+	elif event is InputEventMagnifyGesture:
+		_zoom_by((1.0 - (event as InputEventMagnifyGesture).factor) * CAM_PINCH_ZOOM_GAIN)
+	elif event is InputEventPanGesture:
+		_pan_by_screen_delta((event as InputEventPanGesture).delta * CAM_TRACKPAD_PAN_GAIN / CAM_PAN_SPEED)
+
+func _handle_mouse_button(btn: InputEventMouseButton) -> void:
+	match btn.button_index:
+		MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT:
+			_cam_dragging = btn.pressed
+		MOUSE_BUTTON_WHEEL_UP:
+			_zoom_by(-CAM_WHEEL_ZOOM_STEP)
+		MOUSE_BUTTON_WHEEL_DOWN:
+			_zoom_by(CAM_WHEEL_ZOOM_STEP)
+
+## Incremental drag: each event contributes `motion.relative` pixels, scaled by
+## zoom and by a velocity-based acceleration so fast flicks move further than
+## the raw pixel count would suggest.
+func _handle_mouse_drag(motion: InputEventMouseMotion) -> void:
+	var zoom_scale := _cam.position.y / 36.0
+	var speed_px := motion.velocity.length()
+	var accel := 1.0 + clampf(speed_px / CAM_DRAG_ACCEL_REF_PX, 0.0, CAM_DRAG_ACCEL_MAX - 1.0)
+	_cam.position.x -= motion.relative.x * CAM_PAN_SPEED * zoom_scale * accel
+	_cam.position.z -= motion.relative.y * CAM_PAN_SPEED * zoom_scale * accel
+
+func _pan_by_screen_delta(delta_px: Vector2) -> void:
+	var zoom_scale := _cam.position.y / 36.0
+	_cam.position.x -= delta_px.x * CAM_PAN_SPEED * zoom_scale
+	_cam.position.z -= delta_px.y * CAM_PAN_SPEED * zoom_scale
+
+func _zoom_by(amount: float) -> void:
+	_cam.position.y = clampf(_cam.position.y + amount, CAM_ZOOM_MIN, CAM_ZOOM_MAX)
+
+func _process_keyboard_camera(delta: float) -> void:
+	if _cam == null:
+		return
+	var pan_x := 0.0
+	var pan_z := 0.0
+	if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):
+		pan_z -= 1.0
+	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
+		pan_z += 1.0
+	if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
+		pan_x -= 1.0
+	if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
+		pan_x += 1.0
+	if pan_x != 0.0 or pan_z != 0.0:
+		_key_pan_hold += delta
+		var accel := minf(1.0 + _key_pan_hold * CAM_KEY_ACCEL_RAMP, CAM_KEY_ACCEL_MAX)
 		var zoom_scale := _cam.position.y / 36.0
-		_cam.position.x = _cam_pos_start.x - delta_px.x * CAM_PAN_SPEED * zoom_scale
-		_cam.position.z = _cam_pos_start.z - delta_px.y * CAM_PAN_SPEED * zoom_scale
+		_cam.position.x += pan_x * CAM_KEY_PAN_SPEED * zoom_scale * delta * accel
+		_cam.position.z += pan_z * CAM_KEY_PAN_SPEED * zoom_scale * delta * accel
+	else:
+		_key_pan_hold = 0.0
+	if Input.is_key_pressed(KEY_EQUAL) or Input.is_key_pressed(KEY_PLUS):
+		_zoom_by(-CAM_KEY_ZOOM_SPEED * delta)
+	if Input.is_key_pressed(KEY_MINUS):
+		_zoom_by(CAM_KEY_ZOOM_SPEED * delta)
 
 func _process(delta: float) -> void:
+	_process_keyboard_camera(delta)
 	_tick_acc += delta
 	if _tick_acc >= 1.0 / TICK_RATE:
 		_tick_acc -= 1.0 / TICK_RATE
@@ -117,7 +167,6 @@ func _process(delta: float) -> void:
 		_update_citizens()
 		_check_births()
 
-	# Smooth movement — lerp visual positions toward simulation targets
 	var c_lerp := clampf(CITIZEN_LERP_SPEED * delta, 0.0, 1.0)
 	for i in range(_citizen_nodes.size()):
 		_citizen_nodes[i].position = _citizen_nodes[i].position.lerp(_citizen_target_pos[i], c_lerp)
@@ -130,7 +179,6 @@ func _process(delta: float) -> void:
 	_animate_gathering()
 	_update_chat_bubbles(delta)
 
-	# Fade notify banner
 	if _notify_timer > 0.0:
 		_notify_timer -= delta
 		var alpha := clampf(_notify_timer / 0.8, 0.0, 1.0)
@@ -146,29 +194,6 @@ func tile_to_world(col: int, row: int) -> Vector3:
 func _map_center() -> Vector3:
 	return Vector3((MAP_WIDTH - 1) * 0.5 * TILE_SIZE, 0.0, (MAP_HEIGHT - 1) * 0.5 * TILE_SIZE)
 
-func _get_terrain(col: int, row: int) -> int:
-	# Border wall
-	if col == 0 or col == MAP_WIDTH - 1 or row == 0 or row == MAP_HEIGHT - 1:
-		return T_MOUNTAIN
-	# Interior mountain cluster (top-left corner)
-	if col <= 4 and row <= 4 and col + row <= 6:
-		return T_MOUNTAIN
-	# River: col 18 = deep water, col 17 and 19 = shallow water
-	if row >= 1 and row <= MAP_HEIGHT - 2:
-		if col == 18:
-			return T_DEEP
-		if col == 17 or col == 19:
-			return T_SHALLOW
-	# Forest A: upper-left interior
-	if col >= 3 and col <= 10 and row >= 1 and row <= 6:
-		if (col * 17 + row * 31) % 4 < 3:
-			return T_FOREST
-	# Forest B: lower-right interior (left of river)
-	if col >= 12 and col <= 16 and row >= 7 and row <= 12:
-		if (col * 13 + row * 23) % 4 < 3:
-			return T_FOREST
-	return T_GROUND
-
 # ── Scene builders ────────────────────────────────────────────────────────────
 
 func _build_environment() -> void:
@@ -180,7 +205,7 @@ func _build_environment() -> void:
 	sky.sky_material = ProceduralSkyMaterial.new()
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	env.ambient_light_energy = 0.5
+	env.ambient_light_energy = 0.7
 	env_node.environment = env
 	add_child(env_node)
 
@@ -195,8 +220,8 @@ func _build_lighting() -> void:
 func _build_camera() -> void:
 	_cam = Camera3D.new()
 	_cam.name = "Camera3D"
-	var c := _map_center()
-	_cam.position = Vector3(c.x, 36.0, c.z + 20.0)
+	var village := tile_to_world(VILLAGE_CENTER_COL, VILLAGE_CENTER_ROW)
+	_cam.position = Vector3(village.x, CAM_ZOOM_DEFAULT, village.z + 14.0)
 	_cam.rotation_degrees = Vector3(-55.0, 0.0, 0.0)
 	add_child(_cam)
 
@@ -210,110 +235,6 @@ func _build_bgm() -> void:
 		player.autoplay = true
 	add_child(player)
 
-func _build_terrain() -> void:
-	var body := StaticBody3D.new()
-	body.name = "Terrain"
-	add_child(body)
-
-	var mesh_inst := MeshInstance3D.new()
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(MAP_WIDTH * TILE_SIZE, MAP_HEIGHT * TILE_SIZE)
-	mesh_inst.mesh = plane
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.33, 0.52, 0.22)  # grass
-	mesh_inst.material_override = mat
-	mesh_inst.position = _map_center()
-	body.add_child(mesh_inst)
-
-	var col_shape := CollisionShape3D.new()
-	var box := BoxShape3D.new()
-	box.size = Vector3(MAP_WIDTH * TILE_SIZE, 0.1, MAP_HEIGHT * TILE_SIZE)
-	col_shape.shape = box
-	col_shape.position = _map_center()
-	body.add_child(col_shape)
-
-	_build_terrain_features()
-
-func _build_terrain_features() -> void:
-	var container := Node3D.new()
-	container.name = "TerrainFeatures"
-	add_child(container)
-	for row in range(MAP_HEIGHT):
-		for col in range(MAP_WIDTH):
-			var t := _get_terrain(col, row)
-			var wpos := tile_to_world(col, row)
-			match t:
-				T_MOUNTAIN:
-					_add_mountain(container, wpos)
-				T_FOREST:
-					_add_tree(container, wpos)
-				T_SHALLOW:
-					_add_water_plane(container, wpos, Color(0.3, 0.65, 0.95, 0.72))
-				T_DEEP:
-					_add_water_plane(container, wpos, Color(0.05, 0.18, 0.72, 0.88))
-
-func _add_mountain(parent: Node3D, pos: Vector3) -> void:
-	var mi := MeshInstance3D.new()
-	var cyl := CylinderMesh.new()
-	cyl.top_radius    = 0.0
-	cyl.bottom_radius = TILE_SIZE * 0.48
-	cyl.height        = TILE_SIZE * 0.85
-	mi.mesh = cyl
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.54, 0.51, 0.49)
-	mi.material_override = mat
-	mi.position = pos + Vector3(0, TILE_SIZE * 0.425, 0)
-	parent.add_child(mi)
-
-func _add_tree(parent: Node3D, pos: Vector3) -> void:
-	var root := Node3D.new()
-	root.position = pos
-	# Trunk
-	var trunk_mi := MeshInstance3D.new()
-	var trunk := CylinderMesh.new()
-	trunk.top_radius    = 0.08
-	trunk.bottom_radius = 0.12
-	trunk.height        = 0.55
-	trunk_mi.mesh = trunk
-	var trunk_mat := StandardMaterial3D.new()
-	trunk_mat.albedo_color = Color(0.40, 0.26, 0.12)
-	trunk_mi.material_override = trunk_mat
-	trunk_mi.position.y = 0.28
-	root.add_child(trunk_mi)
-	# Canopy
-	var canopy_mi := MeshInstance3D.new()
-	var canopy := SphereMesh.new()
-	canopy.radius = 0.48
-	canopy.height = 0.96
-	canopy_mi.mesh = canopy
-	var canopy_mat := StandardMaterial3D.new()
-	canopy_mat.albedo_color = Color(0.13, 0.46, 0.11)
-	canopy_mi.material_override = canopy_mat
-	canopy_mi.position.y = 0.9
-	root.add_child(canopy_mi)
-	parent.add_child(root)
-
-func _add_water_plane(parent: Node3D, pos: Vector3, color: Color) -> void:
-	var mi := MeshInstance3D.new()
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(TILE_SIZE * 0.98, TILE_SIZE * 0.98)
-	mi.mesh = plane
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = color
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mi.material_override = mat
-	mi.position = pos + Vector3(0, 0.01, 0)
-	parent.add_child(mi)
-
-func _send_walkable_map() -> void:
-	var data := PackedByteArray()
-	data.resize(MAP_WIDTH * MAP_HEIGHT)
-	for row in range(MAP_HEIGHT):
-		for col in range(MAP_WIDTH):
-			var t := _get_terrain(col, row)
-			data[row * MAP_WIDTH + col] = 0 if (t == T_DEEP or t == T_MOUNTAIN) else 1
-	_world_sim.set_walkable_map(data, MAP_WIDTH, MAP_HEIGHT)
-
 func _build_resources() -> void:
 	var container := Node3D.new()
 	container.name = "Resources"
@@ -322,37 +243,9 @@ func _build_resources() -> void:
 	for i in range(count):
 		var tile: Vector2i = _world_sim.get_resource_pos(i)
 		var kind: String   = _world_sim.get_resource_kind(i)
-		var rnode := _make_resource(kind, tile.x, tile.y)
+		var rnode := ResourceFactory.make(kind, tile.x, tile.y, TILE_SIZE)
 		container.add_child(rnode)
 		_resource_meshes.append(rnode.get_meta("mesh_inst"))
-
-func _make_resource(kind: String, col: int, row: int) -> Node3D:
-	var root := Node3D.new()
-	root.name = "Resource_" + kind
-	var mesh_inst := MeshInstance3D.new()
-	var mat := StandardMaterial3D.new()
-
-	if kind == "berry_bush":
-		var sphere := SphereMesh.new()
-		sphere.radius = 0.4
-		sphere.height = 0.8
-		mesh_inst.mesh = sphere
-		mat.albedo_color = Color(0.08, 0.55, 0.08)
-		root.position = tile_to_world(col, row) + Vector3(0, 0.4, 0)
-	else:  # water_source
-		var cyl := CylinderMesh.new()
-		cyl.top_radius    = 0.5
-		cyl.bottom_radius = 0.5
-		cyl.height        = 0.12
-		mesh_inst.mesh = cyl
-		mat.albedo_color = Color(0.1, 0.45, 0.95)
-		root.position = tile_to_world(col, row) + Vector3(0, 0.06, 0)
-
-	mesh_inst.material_override = mat
-	root.add_child(mesh_inst)
-	root.set_meta("mesh_inst", mesh_inst)
-	root.set_meta("kind", kind)
-	return root
 
 func _build_citizens() -> void:
 	var container := Node3D.new()
@@ -361,7 +254,7 @@ func _build_citizens() -> void:
 	var count: int = _world_sim.get_citizen_count()
 	for i in range(count):
 		var cname: String = _world_sim.get_citizen_name(i)
-		var node := _make_citizen(cname, i)
+		var node := CitizenFactory.make(cname, i)
 		container.add_child(node)
 		_citizen_nodes.append(node)
 		_citizen_behaviors.append("idle")
@@ -369,78 +262,7 @@ func _build_citizens() -> void:
 		_chat_show_timers.append(0.0)
 		_citizen_target_pos.append(Vector3.ZERO)
 		_sync_citizen_pos(i)
-		node.position = _citizen_target_pos[i]  # snap to start position
-
-func _make_citizen(cname: String, idx: int) -> Node3D:
-	var root := Node3D.new()
-	root.name = "Citizen_%d" % idx
-
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.85, 0.65, 0.35)
-	root.set_meta("mat", mat)
-
-	# Chess pawn — base disc
-	var base_mi := MeshInstance3D.new()
-	var base_cyl := CylinderMesh.new()
-	base_cyl.top_radius    = 0.22
-	base_cyl.bottom_radius = 0.26
-	base_cyl.height        = 0.10
-	base_mi.mesh = base_cyl
-	base_mi.material_override = mat
-	base_mi.position.y = 0.05
-	root.add_child(base_mi)
-
-	# Chess pawn — body pillar
-	var body_mi := MeshInstance3D.new()
-	var body_cyl := CylinderMesh.new()
-	body_cyl.top_radius    = 0.13
-	body_cyl.bottom_radius = 0.18
-	body_cyl.height        = 0.55
-	body_mi.mesh = body_cyl
-	body_mi.material_override = mat
-	body_mi.position.y = 0.38
-	root.add_child(body_mi)
-
-	# Chess pawn — head sphere
-	var head_mi := MeshInstance3D.new()
-	var head_sphere := SphereMesh.new()
-	head_sphere.radius = 0.18
-	head_sphere.height = 0.36
-	head_mi.mesh = head_sphere
-	head_mi.material_override = mat
-	head_mi.position.y = 0.82
-	root.add_child(head_mi)
-
-	# Name label (billboard)
-	var name_lbl := Label3D.new()
-	name_lbl.text = cname
-	name_lbl.font_size = 28
-	name_lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	name_lbl.position.y = 1.15
-	root.add_child(name_lbl)
-
-	# Behavior label (billboard)
-	var beh_lbl := Label3D.new()
-	beh_lbl.text = "idle"
-	beh_lbl.font_size = 22
-	beh_lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	beh_lbl.position.y = 1.4
-	beh_lbl.modulate = Color(0.9, 0.9, 0.9)
-	root.add_child(beh_lbl)
-	root.set_meta("beh_lbl", beh_lbl)
-
-	# Chat bubble label (billboard)
-	var chat_lbl := Label3D.new()
-	chat_lbl.text = ""
-	chat_lbl.font_size = 24
-	chat_lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	chat_lbl.position.y = 1.65
-	chat_lbl.modulate = Color(1.0, 1.0, 0.75)
-	chat_lbl.visible = false
-	root.add_child(chat_lbl)
-	root.set_meta("chat_lbl", chat_lbl)
-
-	return root
+		node.position = _citizen_target_pos[i]
 
 func _build_animals() -> void:
 	var container := Node3D.new()
@@ -448,31 +270,13 @@ func _build_animals() -> void:
 	add_child(container)
 	var count: int = _world_sim.get_animal_count()
 	for i in range(count):
-		var anode := _make_deer()
+		var anode := AnimalFactory.make_deer()
 		container.add_child(anode)
 		_animal_nodes.append(anode)
 		_animal_target_pos.append(Vector3.ZERO)
 	_update_animals()
-	# Snap animal positions to their initial targets
 	for i in range(_animal_nodes.size()):
 		_animal_nodes[i].position = _animal_target_pos[i]
-
-func _make_deer() -> Node3D:
-	var root := Node3D.new()
-	root.name = "Deer"
-
-	var mesh_inst := MeshInstance3D.new()
-	var sphere := SphereMesh.new()
-	sphere.radius = 0.25
-	sphere.height = 0.5
-	mesh_inst.mesh = sphere
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.72, 0.50, 0.28)  # tan/brown
-	mesh_inst.material_override = mat
-	mesh_inst.position.y = 0.25
-	root.add_child(mesh_inst)
-
-	return root
 
 func _build_debug_ui() -> void:
 	var layer := CanvasLayer.new()
@@ -486,54 +290,18 @@ func _build_debug_ui() -> void:
 
 	var count := _world_sim.get_citizen_count()
 	for i in range(count):
-		_add_debug_row(_world_sim.get_citizen_name(i))
+		_append_debug_row(_world_sim.get_citizen_name(i))
 
-func _add_debug_row(cname: String) -> void:
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 6)
-	_debug_panel.add_child(row)
-
-	var lbl := Label.new()
-	lbl.text = cname
-	lbl.custom_minimum_size = Vector2(64, 0)
-	row.add_child(lbl)
-
-	var fed_bar := ProgressBar.new()
-	fed_bar.min_value = 0.0
-	fed_bar.max_value = 1.0
-	fed_bar.value     = 1.0
-	fed_bar.custom_minimum_size = Vector2(80, 18)
-	fed_bar.modulate  = Color(1.0, 0.55, 0.1)
-	fed_bar.show_percentage = false
-	row.add_child(fed_bar)
-	_fed_bars.append(fed_bar)
-
-	var hyd_bar := ProgressBar.new()
-	hyd_bar.min_value = 0.0
-	hyd_bar.max_value = 1.0
-	hyd_bar.value     = 1.0
-	hyd_bar.custom_minimum_size = Vector2(80, 18)
-	hyd_bar.modulate  = Color(0.3, 0.6, 1.0)
-	hyd_bar.show_percentage = false
-	row.add_child(hyd_bar)
-	_hyd_bars.append(hyd_bar)
+func _append_debug_row(cname: String) -> void:
+	var bars := DebugHud.add_row(_debug_panel, cname)
+	_fed_bars.append(bars["fed_bar"])
+	_hyd_bars.append(bars["hyd_bar"])
 
 func _build_notify_label() -> void:
 	var layer := CanvasLayer.new()
 	layer.name = "NotifyLayer"
 	add_child(layer)
-
-	_notify_lbl = Label.new()
-	_notify_lbl.name = "NotifyLabel"
-	_notify_lbl.text = ""
-	_notify_lbl.add_theme_font_size_override("font_size", 28)
-	_notify_lbl.add_theme_color_override("font_color", Color(1.0, 0.9, 0.3))
-	# Center horizontally near top
-	_notify_lbl.set_anchor_and_offset(SIDE_LEFT,   0.5, -200.0)
-	_notify_lbl.set_anchor_and_offset(SIDE_RIGHT,  0.5,  200.0)
-	_notify_lbl.set_anchor_and_offset(SIDE_TOP,    0.0,   60.0)
-	_notify_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_notify_lbl.visible = false
+	_notify_lbl = DebugHud.make_notify_label()
 	layer.add_child(_notify_lbl)
 
 func _show_notify(msg: String) -> void:
@@ -584,11 +352,9 @@ func _update_citizens() -> void:
 
 func _update_day_night() -> void:
 	var tick: int = _world_sim.get_tick_count()
-	var progress := float(tick % DAY_TICKS) / float(DAY_TICKS)  # 0.0 → 1.0 per day
-	# Sun arcs from east (dawn) overhead (noon) to west (dusk): X goes -10° → -80° → -170°
+	var progress := float(tick % DAY_TICKS) / float(DAY_TICKS)
 	var angle_x := -10.0 - 340.0 * progress
 	_sun.rotation_degrees.x = angle_x
-	# Brightness peaks at noon (progress ≈ 0.22), dim at night
 	var noon := 1.0 - absf(progress - 0.22) * 5.0
 	_sun.light_energy = lerpf(0.05, 1.4, clampf(noon, 0.0, 1.0))
 
@@ -599,7 +365,7 @@ func _check_births() -> void:
 		var citizens_container := get_node_or_null("Citizens")
 		if citizens_container == null:
 			break
-		var node := _make_citizen(cname, idx)
+		var node := CitizenFactory.make(cname, idx)
 		citizens_container.add_child(node)
 		_citizen_nodes.append(node)
 		_citizen_behaviors.append("idle")
@@ -607,8 +373,8 @@ func _check_births() -> void:
 		_chat_show_timers.append(0.0)
 		_citizen_target_pos.append(Vector3.ZERO)
 		_sync_citizen_pos(idx)
-		node.position = _citizen_target_pos[idx]  # snap to birth tile
-		_add_debug_row(cname)
+		node.position = _citizen_target_pos[idx]
+		_append_debug_row(cname)
 		_show_notify("New citizen born: " + cname + "!")
 
 func _update_resources() -> void:
@@ -629,38 +395,25 @@ func _update_animals() -> void:
 		var anode: Node3D = _animal_nodes[i]
 
 		if fled:
-			# Deer just escaped off the map — fade it out then hide.
-			var mesh_inst: MeshInstance3D = anode.get_child(0) as MeshInstance3D
-			var mat: StandardMaterial3D = mesh_inst.material_override as StandardMaterial3D
-			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-			var tween := create_tween()
-			tween.tween_property(mat, "albedo_color:a", 0.0, 0.6)
+			var tween := AnimalFactory.fade_alpha(anode, 0.0, 0.6)
 			tween.tween_callback(func(): anode.visible = false)
 		elif alive:
-			# Update smooth movement target.
 			var tile: Vector2i = _world_sim.get_animal_pos(i)
 			_animal_target_pos[i] = tile_to_world(tile.x, tile.y)
 			if not anode.visible:
-				# Just respawned — snap position then fade in from transparent.
 				anode.position = _animal_target_pos[i]
-				var mesh_inst: MeshInstance3D = anode.get_child(0) as MeshInstance3D
-				var mat: StandardMaterial3D = mesh_inst.material_override as StandardMaterial3D
-				mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-				mat.albedo_color.a = 0.0
+				AnimalFactory.set_alpha(anode, 0.0)
 				anode.visible = true
-				var tween := create_tween()
-				tween.tween_property(mat, "albedo_color:a", 1.0, 0.6)
+				AnimalFactory.fade_alpha(anode, 1.0, 0.6)
 
 func _update_chat_bubbles(delta: float) -> void:
 	for i in range(_citizen_nodes.size()):
-		# Count down display timer — hide bubble when expired
 		if _chat_show_timers[i] > 0.0:
 			_chat_show_timers[i] -= delta
 			if _chat_show_timers[i] <= 0.0:
 				var chat_lbl: Label3D = _citizen_nodes[i].get_meta("chat_lbl")
 				chat_lbl.visible = false
 
-		# Count down gap timer — show a new bubble when expired
 		if _chat_gap_timers[i] > 0.0:
 			_chat_gap_timers[i] -= delta
 			if _chat_gap_timers[i] <= 0.0:

@@ -149,22 +149,39 @@ impl World {
     }
 
     /// Advance one game turn synchronously.
+    ///
+    /// Each phase is extracted into a dedicated method to keep this driver readable.
+    /// Phase order matters — do not reorder without reading `tick_*` bodies.
     pub fn tick(&mut self, _random_roll: f32) {
         self.tick_count += 1;
+        self.tick_decay();
+        self.tick_resources();
+        self.tick_behaviors();
+        self.tick_stationary_interactions();
+        self.tick_movement();
+        self.tick_hunting();
+        self.tick_animals();
+        self.maybe_spawn_citizen();
+    }
 
-        // Step 1: decay vitals
+    /// Phase 1: decay every citizen's fed/hydration toward zero.
+    fn tick_decay(&mut self) {
         for v in &mut self.vitals {
             v.fed = (v.fed - FED_DECAY_PER_TICK).max(0.0);
             v.hydration = (v.hydration - HYDRATION_DECAY_PER_TICK).max(0.0);
         }
+    }
 
-        // Step 2: tick resources (respawn timers)
+    /// Phase 2: advance respawn timers on all resources.
+    fn tick_resources(&mut self) {
         for r in &mut self.resources {
             r.tick();
         }
+    }
 
-        // Step 3: update behavior states from needs.
-        // After behavior_tick, override Idle→Hunting when hungry and animals exist.
+    /// Phase 3: update behavior states from needs, with a Hunting override
+    /// when hungry citizens can still chase live animals.
+    fn tick_behaviors(&mut self) {
         let any_alive_animal = self.animals.iter().any(|a| a.alive);
         for i in 0..self.citizens.len() {
             let action = behavior_tick(
@@ -177,16 +194,19 @@ impl World {
             if let BehaviorAction::TransitionTo(next) = action {
                 self.behavior_states[i] = next;
             }
-            // Prefer hunting over berry-gathering when fed < threshold and animals available.
             if self.behavior_states[i] == BehaviorState::SeekingFood
                 && any_alive_animal
-                && self.vitals[i].fed > 0.15 // still strong enough to hunt
+                && self.vitals[i].fed > 0.15
             {
                 self.behavior_states[i] = BehaviorState::Hunting;
             }
         }
+    }
 
-        // Step 4a: stationary resource interactions (no grid required).
+    /// Phase 4a: apply stationary resource interactions (gather/drink).
+    /// Runs before movement so a citizen that reached its target last tick
+    /// can consume the resource this tick.
+    fn tick_stationary_interactions(&mut self) {
         for i in 0..self.citizens.len() {
             match self.behavior_states[i] {
                 BehaviorState::Gathering => {
@@ -202,7 +222,6 @@ impl World {
                     }
                     self.vitals[i].fed = (self.vitals[i].fed + gathered).min(1.0);
 
-                    // If the bush ran out, go back to seeking
                     let still_available = self.resources.iter().any(|r| {
                         r.kind == ResourceKind::BerryBush && r.pos == pos && r.is_available()
                     });
@@ -216,72 +235,76 @@ impl World {
                 _ => {}
             }
         }
+    }
 
-        // Step 4b: movement (requires grid).
-        // Use take/replace to satisfy the borrow checker.
-        if let Some(grid) = self.walk_grid.take() {
-            for i in 0..self.citizens.len() {
-                let seed = self
-                    .tick_count
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(i as u64 * 2654435761);
+    /// Phase 4b: move citizens according to their current behavior.
+    /// Uses `Option::take`/assign to satisfy the borrow checker while
+    /// `walk_grid` and `move_states` are both mutably referenced.
+    fn tick_movement(&mut self) {
+        let Some(grid) = self.walk_grid.take() else {
+            return;
+        };
+        for i in 0..self.citizens.len() {
+            let seed = self
+                .tick_count
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(i as u64 * 2654435761);
 
-                match self.behavior_states[i] {
-                    BehaviorState::Idle => {
+            match self.behavior_states[i] {
+                BehaviorState::Idle => {
+                    step_citizen(&mut self.move_states[i], &grid, seed);
+                }
+                BehaviorState::SeekingFood => {
+                    let from = self.move_states[i].tile_pos;
+                    if let Some(target) = self.nearest_resource_pos(from, ResourceKind::BerryBush) {
+                        if target == from {
+                            let available = self.resources.iter().any(|r| {
+                                r.kind == ResourceKind::BerryBush && r.pos == target && r.is_available()
+                            });
+                            if available {
+                                self.behavior_states[i] = BehaviorState::Gathering;
+                            }
+                        } else {
+                            self.move_states[i].move_target = Some(target);
+                            step_citizen(&mut self.move_states[i], &grid, seed);
+                        }
+                    } else {
                         step_citizen(&mut self.move_states[i], &grid, seed);
                     }
-                    BehaviorState::SeekingFood => {
-                        let from = self.move_states[i].tile_pos;
-                        if let Some(target) = self.nearest_resource_pos(from, ResourceKind::BerryBush) {
-                            if target == from {
-                                let available = self.resources.iter().any(|r| {
-                                    r.kind == ResourceKind::BerryBush && r.pos == target && r.is_available()
-                                });
-                                if available {
-                                    self.behavior_states[i] = BehaviorState::Gathering;
-                                }
-                            } else {
-                                self.move_states[i].move_target = Some(target);
-                                step_citizen(&mut self.move_states[i], &grid, seed);
-                            }
-                        } else {
-                            step_citizen(&mut self.move_states[i], &grid, seed);
-                        }
-                    }
-                    BehaviorState::SeekingWater => {
-                        let from = self.move_states[i].tile_pos;
-                        if let Some(target) = self.nearest_resource_pos(from, ResourceKind::WaterSource) {
-                            if target == from {
-                                self.behavior_states[i] = BehaviorState::Drinking;
-                            } else {
-                                self.move_states[i].move_target = Some(target);
-                                step_citizen(&mut self.move_states[i], &grid, seed);
-                            }
-                        } else {
-                            step_citizen(&mut self.move_states[i], &grid, seed);
-                        }
-                    }
-                    BehaviorState::Hunting => {
-                        let from = self.move_states[i].tile_pos;
-                        if let Some(target) = self.nearest_animal_pos(from) {
-                            if target != from {
-                                self.move_states[i].move_target = Some(target);
-                                step_citizen(&mut self.move_states[i], &grid, seed);
-                            }
-                            // At target tile: wait for other hunters (resolved in step 4c).
-                        } else {
-                            // No animals alive — fall back to berry gathering.
-                            self.behavior_states[i] = BehaviorState::SeekingFood;
-                        }
-                    }
-                    // Gathering and Drinking are handled in step 4a — no movement.
-                    BehaviorState::Gathering | BehaviorState::Drinking => {}
                 }
+                BehaviorState::SeekingWater => {
+                    let from = self.move_states[i].tile_pos;
+                    if let Some(target) = self.nearest_resource_pos(from, ResourceKind::WaterSource) {
+                        if target == from {
+                            self.behavior_states[i] = BehaviorState::Drinking;
+                        } else {
+                            self.move_states[i].move_target = Some(target);
+                            step_citizen(&mut self.move_states[i], &grid, seed);
+                        }
+                    } else {
+                        step_citizen(&mut self.move_states[i], &grid, seed);
+                    }
+                }
+                BehaviorState::Hunting => {
+                    let from = self.move_states[i].tile_pos;
+                    if let Some(target) = self.nearest_animal_pos(from) {
+                        if target != from {
+                            self.move_states[i].move_target = Some(target);
+                            step_citizen(&mut self.move_states[i], &grid, seed);
+                        }
+                    } else {
+                        self.behavior_states[i] = BehaviorState::SeekingFood;
+                    }
+                }
+                BehaviorState::Gathering | BehaviorState::Drinking => {}
             }
-            self.walk_grid = Some(grid);
         }
+        self.walk_grid = Some(grid);
+    }
 
-        // Step 4c: cooperative hunting — kill animals with 2+ hunters on same tile.
+    /// Phase 4c: cooperative hunting — when ≥2 Hunting citizens share an
+    /// animal's tile, the animal dies and each hunter gains food.
+    fn tick_hunting(&mut self) {
         for ai in 0..self.animals.len() {
             if !self.animals[ai].alive {
                 continue;
@@ -300,8 +323,12 @@ impl World {
                 }
             }
         }
+    }
 
-        // Step 4d: animal respawn + wander / flee.
+    /// Phase 4d: tick animal respawn timers and step wander/flee AI.
+    /// `nearest_humans` is precomputed so each animal can be borrowed mutably
+    /// without reborrowing the citizens' movement state inside the loop.
+    fn tick_animals(&mut self) {
         let do_wander = Animal::should_wander(self.tick_count);
         let human_positions: Vec<TilePos> =
             self.move_states.iter().map(|ms| ms.tile_pos).collect();
@@ -328,9 +355,6 @@ impl World {
                 animal.flee_or_wander(nearest_humans[ai], seed);
             }
         }
-
-        // Step 5: population growth when the tribe is thriving.
-        self.maybe_spawn_citizen();
     }
 }
 

@@ -18,7 +18,7 @@ DLC: 住民を細胞、世界を人体にした版。
 **host側（Macターミナル）:**
 ```bash
 # supergatewayでgodot-mcpをSSEサーバとして公開
-while true; do npx supergateway --stdio "npx @coding-solo/godot-mcp" --port 3001 sleep 1 done &
+while true; do npx supergateway --stdio "npx @coding-solo/godot-mcp" --port 3001; sleep 1; done &
 ```
 
 **devcontainer側（初回のみ）:**

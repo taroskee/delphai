@@ -1,7 +1,7 @@
-/// Technology tree for the first civilization era.
-///
-/// Research points accumulate whenever a citizen gathers food.
-/// When enough points are collected, the next unlocked tech fires its effect.
+//! Technology tree for the first civilization era.
+//!
+//! Research points accumulate whenever a citizen gathers food.
+//! When enough points are collected, the next unlocked tech fires its effect.
 
 pub type TechNodeId = u32;
 

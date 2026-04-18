@@ -79,10 +79,10 @@ impl Animal {
             (0, dy.signum())
         };
 
-        let nx = self.pos.x + mx as i16;
-        let ny = self.pos.y + my as i16;
+        let nx = self.pos.x + mx;
+        let ny = self.pos.y + my;
 
-        if nx < 0 || nx >= MAP_W || ny < 0 || ny >= MAP_H {
+        if !(0..MAP_W).contains(&nx) || !(0..MAP_H).contains(&ny) {
             // Off the map — the animal escapes.
             self.alive = false;
             self.fled = true;
@@ -144,7 +144,7 @@ impl Animal {
 
     /// True when ticks_count signals that animals should move this tick.
     pub fn should_wander(tick_count: u64) -> bool {
-        tick_count % WANDER_EVERY == 0
+        tick_count.is_multiple_of(WANDER_EVERY)
     }
 }
 
