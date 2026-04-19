@@ -84,8 +84,8 @@ func _ready() -> void:
 	_build_environment()
 	_build_lighting()
 	_build_camera()
+	TerrainBuilder.build_terrain3d(self, tile_to_world(VILLAGE_CENTER_COL, VILLAGE_CENTER_ROW))
 	TerrainBuilder.build_collision_plane(self, MAP_WIDTH, MAP_HEIGHT, TILE_SIZE)
-	TerrainBuilder.build_visual_backdrop(self, _map_center())
 	TerrainBuilder.build_features(self, MAP_WIDTH, MAP_HEIGHT, TILE_SIZE)
 	_world_sim.set_walkable_map(TerrainBuilder.make_walkable_map(MAP_WIDTH, MAP_HEIGHT), MAP_WIDTH, MAP_HEIGHT)
 	VillageBuilder.add_campfire(self, tile_to_world(VILLAGE_CENTER_COL, VILLAGE_CENTER_ROW))
@@ -194,11 +194,6 @@ func _process(delta: float) -> void:
 func tile_to_world(col: int, row: int) -> Vector3:
 	var x := col * TILE_SIZE
 	var z := row * TILE_SIZE
-	return Vector3(x, TerrainBuilder.get_height_at(x, z), z)
-
-func _map_center() -> Vector3:
-	var x := (MAP_WIDTH - 1) * 0.5 * TILE_SIZE
-	var z := (MAP_HEIGHT - 1) * 0.5 * TILE_SIZE
 	return Vector3(x, TerrainBuilder.get_height_at(x, z), z)
 
 # ── Scene builders ────────────────────────────────────────────────────────────

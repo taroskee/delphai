@@ -6,6 +6,9 @@
 **/assets/**
 !**/assets/inventry.md
 **/__pycache__
+**/addons/**
+**/demo/**
+game/icon.png
 
 # Claude Code local data (plans, memory — developer-specific)
 .claude/

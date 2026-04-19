@@ -2,13 +2,15 @@ class_name TerrainBuilder
 extends RefCounted
 
 ## Pure builder for the terrain grid and its walkable bitmap.
-## All methods are static — no state lives on this class. `world.gd` calls
-## `build_collision_plane`, `build_visual_backdrop`, `build_features`,
-## and `make_walkable_map` during setup.
+## All methods are static — no state lives on this class except `_terrain`,
+## which holds the live Terrain3D node so `get_height_at` can query it.
+##
+## `world.gd` calls `build_collision_plane`, `build_terrain3d`,
+## `build_features`, and `make_walkable_map` during setup.
 ##
 ## `get_height_at(x, z)` is the single Y-source-of-truth for placing objects
-## on the ground. Currently returns 0.0 (flat world); Sprint 13.3 replaces
-## the body with Terrain3D Raycast sampling.
+## on the ground. Before `build_terrain3d` has run it returns 0.0; afterwards
+## it samples Terrain3DData.
 
 # Terrain codes
 const T_GROUND   := 0
@@ -26,6 +28,23 @@ const FOREST_A_COLS        := [3, 10]  # inclusive range — NW
 const FOREST_A_ROWS        := [1, 6]
 const FOREST_B_COLS        := [4, 10]   # SW — moved from [12,16] so the SE quadrant
 const FOREST_B_ROWS        := [8, 12]   # remains open flat grass for the village.
+
+# Terrain3D procgen parameters (Sprint 13.1).
+# Fixed seed keeps MVP reproducible; post-MVP randomizes this only.
+const TERRAIN_SEED         := 42
+const TERRAIN_NOISE_FREQ   := 0.05
+const TERRAIN_REGION_SIZE  := 512    # meters per Terrain3DRegion
+const TERRAIN_IMAGE_SIZE   := 512    # heightmap pixels (1 px = 1 m)
+const TERRAIN_HEIGHT_SCALE := 5.0    # noise [-1, 1] → ±5 m world
+# Village flat-zone: within FLAT_RADIUS height is forced to 0 so citizens
+# spawn on a level plain. FADE_RADIUS smooths the transition back to noise.
+const VILLAGE_FLAT_RADIUS  := 10.0
+const VILLAGE_FADE_RADIUS  := 15.0
+
+# Held so `get_height_at(x, z)` can sample the live Terrain3D.data.
+# Remains null until `build_terrain3d` runs, in which case `get_height_at`
+# returns 0.0 (flat world) — preserving the Sprint 13.01 seam behavior.
+static var _terrain: Terrain3D = null
 
 ## Classify a tile. `map_w`/`map_h` are inclusive of border walls.
 static func get_terrain(col: int, row: int, map_w: int, map_h: int) -> int:
@@ -47,28 +66,27 @@ static func get_terrain(col: int, row: int, map_w: int, map_h: int) -> int:
 	return T_GROUND
 
 ## Single Y-source-of-truth for placing objects on the ground.
-## Currently returns 0.0 (flat world); Sprint 13.3 replaces the body with
-## Terrain3D Raycast sampling so citizens/resources/animals snap to the heightmap.
-static func get_height_at(_x: float, _z: float) -> float:
-	return 0.0
-
-# Deprecated: Sprint 13.1 で Terrain3D に置換予定。
-# terrian.glb は装飾背景としてのみ使用中で、物理・ロジックとは分離している。
-const GROUND_GLB         := "res://assets/geography/terrian.glb"
-# Deprecated: Sprint 13.1 で Terrain3D に置換予定。
-const GROUND_GLB_SCALE   := 0.15
-# Deprecated: Sprint 13.1 で Terrain3D に置換予定。
-const GROUND_GLB_Y       := -0.05
+## Returns 0.0 until `build_terrain3d` has populated `_terrain`.
+## After procgen, samples Terrain3DData; NaN results (sampled outside a
+## region) fall back to 0.0 so callers never get a poisoned Y.
+static func get_height_at(x: float, z: float) -> float:
+	if _terrain == null:
+		return 0.0
+	var h: float = _terrain.data.get_height(Vector3(x, 0.0, z))
+	return 0.0 if is_nan(h) else h
 
 ## Build the invisible collision plane under `parent`. Only physics — no visual.
-## The StaticBody+CollisionShape provide character grounding; the green PlaneMesh
-## has been removed (terrian.glb / Terrain3D owns the visual).
+## Terrain3D owns the primary collision; this BoxShape3D is a flat fallback
+## ensuring characters cannot fall through in case Terrain3DCollision fails
+## to initialize or heightmap generation produces NaN outside the region.
 static func build_collision_plane(parent: Node3D, map_w: int, map_h: int, tile_size: float) -> void:
 	var body := StaticBody3D.new()
 	body.name = "Terrain"
 	parent.add_child(body)
 
-	var center := Vector3((map_w - 1) * 0.5 * tile_size, get_height_at((map_w - 1) * 0.5 * tile_size, (map_h - 1) * 0.5 * tile_size), (map_h - 1) * 0.5 * tile_size)
+	var cx := (map_w - 1) * 0.5 * tile_size
+	var cz := (map_h - 1) * 0.5 * tile_size
+	var center := Vector3(cx, get_height_at(cx, cz), cz)
 
 	var col_shape := CollisionShape3D.new()
 	var box := BoxShape3D.new()
@@ -77,24 +95,34 @@ static func build_collision_plane(parent: Node3D, map_w: int, map_h: int, tile_s
 	col_shape.position = center
 	body.add_child(col_shape)
 
-## Load `terrian.glb` as a decorative backdrop centered at `center`.
-## Sprint 13.1 で Terrain3D ノード生成に置換予定。
-static func build_visual_backdrop(parent: Node3D, center: Vector3) -> void:
-	var packed := load(GROUND_GLB) as PackedScene
-	if packed == null:
-		return
-	var scene := packed.instantiate() as Node3D
-	if scene == null:
-		return
-	scene.name = "TerrainBackdrop"
-	scene.scale = Vector3.ONE * GROUND_GLB_SCALE
-	scene.position = center + Vector3(0, GROUND_GLB_Y, 0)
-	parent.add_child(scene)
+## Build a procedurally-generated Terrain3D under `parent`.
+## Replaces the deprecated terrian.glb backdrop. Heightmap is seeded
+## FastNoiseLite forced flat within VILLAGE_FLAT_RADIUS of `village_center`,
+## so citizens spawned at the village tile stand on level ground.
+static func build_terrain3d(parent: Node3D, village_center: Vector3) -> Terrain3D:
+	var terrain := Terrain3D.new()
+	terrain.name = "Terrain3D"
+	terrain.region_size = TERRAIN_REGION_SIZE
+
+	var assets := Terrain3DAssets.new()
+	assets.set_texture(0, _create_grass_asset())
+	terrain.assets = assets
+
+	parent.add_child(terrain)
+
+	var img := _generate_heightmap(village_center)
+	terrain.data.import_images([img, null, null], Vector3.ZERO, 0.0, TERRAIN_HEIGHT_SCALE)
+
+	terrain.collision.mode = Terrain3DCollision.DYNAMIC
+
+	_terrain = terrain
+	return terrain
 
 ## Build trees per-tile under a new "TerrainFeatures" node.
 ## Mountains, shallow/deep water, and the green ground plane are now fully
-## expressed by `terrian.glb` — we no longer add primitive polygons for them.
-## The walkable bitmap still classifies T_MOUNTAIN and T_DEEP as blocked.
+## expressed by the Terrain3D heightmap — we no longer add primitive polygons
+## for them. The walkable bitmap still classifies T_MOUNTAIN and T_DEEP as
+## blocked.
 static func build_features(parent: Node3D, map_w: int, map_h: int, tile_size: float) -> void:
 	var container := Node3D.new()
 	container.name = "TerrainFeatures"
@@ -118,6 +146,49 @@ static func make_walkable_map(map_w: int, map_h: int) -> PackedByteArray:
 			var t := get_terrain(col, row, map_w, map_h)
 			data[row * map_w + col] = 0 if (t == T_DEEP or t == T_MOUNTAIN) else 1
 	return data
+
+# ── Private terrain builders ──────────────────────────────────────────────────
+
+## Seeded FastNoiseLite heightmap with a flattened disc around the village.
+## Image is FORMAT_RF; each pixel stores raw noise ∈ [-1, 1] in the R channel.
+## `import_images` multiplies by TERRAIN_HEIGHT_SCALE later.
+static func _generate_heightmap(village_center: Vector3) -> Image:
+	var noise := FastNoiseLite.new()
+	noise.seed = TERRAIN_SEED
+	noise.frequency = TERRAIN_NOISE_FREQ
+
+	var size := TERRAIN_IMAGE_SIZE
+	var img := Image.create_empty(size, size, false, Image.FORMAT_RF)
+	var vx := village_center.x
+	var vz := village_center.z
+	var flat_r2 := VILLAGE_FLAT_RADIUS * VILLAGE_FLAT_RADIUS
+	var fade_r2 := VILLAGE_FADE_RADIUS * VILLAGE_FADE_RADIUS
+	for y in range(size):
+		for x in range(size):
+			var dx := float(x) - vx
+			var dz := float(y) - vz
+			var d2 := dx * dx + dz * dz
+			var h := noise.get_noise_2d(float(x), float(y))
+			if d2 <= flat_r2:
+				h = 0.0
+			elif d2 < fade_r2:
+				var t := (sqrt(d2) - VILLAGE_FLAT_RADIUS) / (VILLAGE_FADE_RADIUS - VILLAGE_FLAT_RADIUS)
+				h *= t
+			img.set_pixel(x, y, Color(h, 0.0, 0.0, 1.0))
+	return img
+
+## Single-color grass texture so Terrain3D renders a solid green surface.
+## Sprint 13.2 will upgrade this to multi-texture (grass/shallow/deep/mountain)
+## driven by the heightmap classifier.
+static func _create_grass_asset() -> Terrain3DTextureAsset:
+	var img := Image.create_empty(64, 64, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0.26, 0.52, 0.26, 1.0))
+	var tex := ImageTexture.create_from_image(img)
+	var ta := Terrain3DTextureAsset.new()
+	ta.name = "Grass"
+	ta.albedo_texture = tex
+	ta.uv_scale = 0.5
+	return ta
 
 # ── Private feature builders ──────────────────────────────────────────────────
 
