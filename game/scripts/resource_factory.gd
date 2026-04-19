@@ -26,7 +26,9 @@ const WATER_ROCK_SCALE  := 0.28
 static func make(kind: String, col: int, row: int, tile_size: float) -> Node3D:
 	var root := Node3D.new()
 	root.name = "Resource_" + kind
-	var wpos := Vector3(col * tile_size, 0.0, row * tile_size)
+	var x := col * tile_size
+	var z := row * tile_size
+	var wpos := Vector3(x, TerrainBuilder.get_height_at(x, z), z)
 
 	var scalable: Node3D
 	if kind == "berry_bush":

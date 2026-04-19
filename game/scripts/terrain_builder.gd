@@ -3,7 +3,12 @@ extends RefCounted
 
 ## Pure builder for the terrain grid and its walkable bitmap.
 ## All methods are static — no state lives on this class. `world.gd` calls
-## `build_ground`, `build_features`, and `make_walkable_map` during setup.
+## `build_collision_plane`, `build_visual_backdrop`, `build_features`,
+## and `make_walkable_map` during setup.
+##
+## `get_height_at(x, z)` is the single Y-source-of-truth for placing objects
+## on the ground. Currently returns 0.0 (flat world); Sprint 13.3 replaces
+## the body with Terrain3D Raycast sampling.
 
 # Terrain codes
 const T_GROUND   := 0
@@ -41,21 +46,29 @@ static func get_terrain(col: int, row: int, map_w: int, map_h: int) -> int:
 			return T_FOREST
 	return T_GROUND
 
+## Single Y-source-of-truth for placing objects on the ground.
+## Currently returns 0.0 (flat world); Sprint 13.3 replaces the body with
+## Terrain3D Raycast sampling so citizens/resources/animals snap to the heightmap.
+static func get_height_at(_x: float, _z: float) -> float:
+	return 0.0
+
+# Deprecated: Sprint 13.1 で Terrain3D に置換予定。
+# terrian.glb は装飾背景としてのみ使用中で、物理・ロジックとは分離している。
 const GROUND_GLB         := "res://assets/geography/terrian.glb"
-# Sketchfab monolithic terrain — not per-tile. Placed as a decorative backdrop
-# beneath the flat plane. Scale/Y-offset are empirical; tune in the editor if needed.
+# Deprecated: Sprint 13.1 で Terrain3D に置換予定。
 const GROUND_GLB_SCALE   := 0.15
+# Deprecated: Sprint 13.1 で Terrain3D に置換予定。
 const GROUND_GLB_Y       := -0.05
 
-## Build the invisible collision plane + load the `terrian.glb` backdrop under `parent`.
-## The green PlaneMesh has been removed — the GLB is now the sole visual;
-## the StaticBody+CollisionShape remain only to provide character grounding.
-static func build_ground(parent: Node3D, map_w: int, map_h: int, tile_size: float) -> void:
+## Build the invisible collision plane under `parent`. Only physics — no visual.
+## The StaticBody+CollisionShape provide character grounding; the green PlaneMesh
+## has been removed (terrian.glb / Terrain3D owns the visual).
+static func build_collision_plane(parent: Node3D, map_w: int, map_h: int, tile_size: float) -> void:
 	var body := StaticBody3D.new()
 	body.name = "Terrain"
 	parent.add_child(body)
 
-	var center := Vector3((map_w - 1) * 0.5 * tile_size, 0.0, (map_h - 1) * 0.5 * tile_size)
+	var center := Vector3((map_w - 1) * 0.5 * tile_size, get_height_at((map_w - 1) * 0.5 * tile_size, (map_h - 1) * 0.5 * tile_size), (map_h - 1) * 0.5 * tile_size)
 
 	var col_shape := CollisionShape3D.new()
 	var box := BoxShape3D.new()
@@ -64,9 +77,9 @@ static func build_ground(parent: Node3D, map_w: int, map_h: int, tile_size: floa
 	col_shape.position = center
 	body.add_child(col_shape)
 
-	_add_ground_glb_backdrop(parent, center)
-
-static func _add_ground_glb_backdrop(parent: Node3D, center: Vector3) -> void:
+## Load `terrian.glb` as a decorative backdrop centered at `center`.
+## Sprint 13.1 で Terrain3D ノード生成に置換予定。
+static func build_visual_backdrop(parent: Node3D, center: Vector3) -> void:
 	var packed := load(GROUND_GLB) as PackedScene
 	if packed == null:
 		return
@@ -90,7 +103,9 @@ static func build_features(parent: Node3D, map_w: int, map_h: int, tile_size: fl
 		for col in range(map_w):
 			var t := get_terrain(col, row, map_w, map_h)
 			if t == T_FOREST:
-				var wpos := Vector3(col * tile_size, 0.0, row * tile_size)
+				var x := col * tile_size
+				var z := row * tile_size
+				var wpos := Vector3(x, get_height_at(x, z), z)
 				_add_tree(container, wpos)
 
 ## Produce the walkable bitmap sent to the Rust side.
