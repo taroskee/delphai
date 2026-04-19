@@ -17,10 +17,10 @@ const RIVER_DEEP_COL       := 18
 const RIVER_SHALLOW_COLS   := [17, 19]
 const MOUNTAIN_CORNER_MAX  := 4   # col,row ≤ this
 const MOUNTAIN_DIAG_MAX    := 6   # col+row ≤ this
-const FOREST_A_COLS        := [3, 10]  # inclusive range
+const FOREST_A_COLS        := [3, 10]  # inclusive range — NW
 const FOREST_A_ROWS        := [1, 6]
-const FOREST_B_COLS        := [12, 16]
-const FOREST_B_ROWS        := [7, 12]
+const FOREST_B_COLS        := [4, 10]   # SW — moved from [12,16] so the SE quadrant
+const FOREST_B_ROWS        := [8, 12]   # remains open flat grass for the village.
 
 ## Classify a tile. `map_w`/`map_h` are inclusive of border walls.
 static func get_terrain(col: int, row: int, map_w: int, map_h: int) -> int:
@@ -47,25 +47,15 @@ const GROUND_GLB         := "res://assets/geography/terrian.glb"
 const GROUND_GLB_SCALE   := 0.15
 const GROUND_GLB_Y       := -0.05
 
-## Build the flat ground plane + collision under `parent`.
-## Also loads the decorative `terrian.glb` backdrop beneath when available
-## (falls back to the plane-only look if the GLB is missing).
+## Build the invisible collision plane + load the `terrian.glb` backdrop under `parent`.
+## The green PlaneMesh has been removed — the GLB is now the sole visual;
+## the StaticBody+CollisionShape remain only to provide character grounding.
 static func build_ground(parent: Node3D, map_w: int, map_h: int, tile_size: float) -> void:
 	var body := StaticBody3D.new()
 	body.name = "Terrain"
 	parent.add_child(body)
 
 	var center := Vector3((map_w - 1) * 0.5 * tile_size, 0.0, (map_h - 1) * 0.5 * tile_size)
-
-	var mesh_inst := MeshInstance3D.new()
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(map_w * tile_size, map_h * tile_size)
-	mesh_inst.mesh = plane
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.33, 0.52, 0.22)  # grass
-	mesh_inst.material_override = mat
-	mesh_inst.position = center
-	body.add_child(mesh_inst)
 
 	var col_shape := CollisionShape3D.new()
 	var box := BoxShape3D.new()
@@ -88,7 +78,10 @@ static func _add_ground_glb_backdrop(parent: Node3D, center: Vector3) -> void:
 	scene.position = center + Vector3(0, GROUND_GLB_Y, 0)
 	parent.add_child(scene)
 
-## Build mountains / trees / water planes per-tile under a new "TerrainFeatures" node.
+## Build trees per-tile under a new "TerrainFeatures" node.
+## Mountains, shallow/deep water, and the green ground plane are now fully
+## expressed by `terrian.glb` — we no longer add primitive polygons for them.
+## The walkable bitmap still classifies T_MOUNTAIN and T_DEEP as blocked.
 static func build_features(parent: Node3D, map_w: int, map_h: int, tile_size: float) -> void:
 	var container := Node3D.new()
 	container.name = "TerrainFeatures"
@@ -96,16 +89,9 @@ static func build_features(parent: Node3D, map_w: int, map_h: int, tile_size: fl
 	for row in range(map_h):
 		for col in range(map_w):
 			var t := get_terrain(col, row, map_w, map_h)
-			var wpos := Vector3(col * tile_size, 0.0, row * tile_size)
-			match t:
-				T_MOUNTAIN:
-					_add_mountain(container, wpos, tile_size)
-				T_FOREST:
-					_add_tree(container, wpos)
-				T_SHALLOW:
-					_add_water_plane(container, wpos, tile_size, Color(0.3, 0.65, 0.95, 0.72))
-				T_DEEP:
-					_add_water_plane(container, wpos, tile_size, Color(0.05, 0.18, 0.72, 0.88))
+			if t == T_FOREST:
+				var wpos := Vector3(col * tile_size, 0.0, row * tile_size)
+				_add_tree(container, wpos)
 
 ## Produce the walkable bitmap sent to the Rust side.
 ## `1` = walkable, `0` = blocked (deep water, mountains).
@@ -120,66 +106,16 @@ static func make_walkable_map(map_w: int, map_h: int) -> PackedByteArray:
 
 # ── Private feature builders ──────────────────────────────────────────────────
 
-static func _add_mountain(parent: Node3D, pos: Vector3, tile_size: float) -> void:
-	var mi := MeshInstance3D.new()
-	var cyl := CylinderMesh.new()
-	cyl.top_radius    = 0.0
-	cyl.bottom_radius = tile_size * 0.48
-	cyl.height        = tile_size * 0.85
-	mi.mesh = cyl
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.54, 0.51, 0.49)
-	mi.material_override = mat
-	mi.position = pos + Vector3(0, tile_size * 0.425, 0)
-	parent.add_child(mi)
-
 const TREE_GLB       := "res://assets/nature/simple_nature_pack_glb.glb"
 const TREE_NODE_NAME := "Oak_Tree_01"
 const TREE_SCALE     := 0.35
 
 static func _add_tree(parent: Node3D, pos: Vector3) -> void:
+	var glb_node := GlbLoader.load_subscene(TREE_GLB, TREE_NODE_NAME)
+	if glb_node == null:
+		return
 	var root := Node3D.new()
 	root.position = pos
-	var glb_node := GlbLoader.load_subscene(TREE_GLB, TREE_NODE_NAME)
-	if glb_node != null:
-		glb_node.scale = Vector3.ONE * TREE_SCALE
-		root.add_child(glb_node)
-	else:
-		_add_tree_fallback(root)
+	glb_node.scale = Vector3.ONE * TREE_SCALE
+	root.add_child(glb_node)
 	parent.add_child(root)
-
-static func _add_tree_fallback(root: Node3D) -> void:
-	var trunk_mi := MeshInstance3D.new()
-	var trunk := CylinderMesh.new()
-	trunk.top_radius    = 0.08
-	trunk.bottom_radius = 0.12
-	trunk.height        = 0.55
-	trunk_mi.mesh = trunk
-	var trunk_mat := StandardMaterial3D.new()
-	trunk_mat.albedo_color = Color(0.40, 0.26, 0.12)
-	trunk_mi.material_override = trunk_mat
-	trunk_mi.position.y = 0.28
-	root.add_child(trunk_mi)
-
-	var canopy_mi := MeshInstance3D.new()
-	var canopy := SphereMesh.new()
-	canopy.radius = 0.48
-	canopy.height = 0.96
-	canopy_mi.mesh = canopy
-	var canopy_mat := StandardMaterial3D.new()
-	canopy_mat.albedo_color = Color(0.13, 0.46, 0.11)
-	canopy_mi.material_override = canopy_mat
-	canopy_mi.position.y = 0.9
-	root.add_child(canopy_mi)
-
-static func _add_water_plane(parent: Node3D, pos: Vector3, tile_size: float, color: Color) -> void:
-	var mi := MeshInstance3D.new()
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(tile_size * 0.98, tile_size * 0.98)
-	mi.mesh = plane
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = color
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mi.material_override = mat
-	mi.position = pos + Vector3(0, 0.01, 0)
-	parent.add_child(mi)

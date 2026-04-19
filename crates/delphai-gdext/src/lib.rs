@@ -56,11 +56,12 @@ impl WorldNode {
 
         let mut world = World::new(vec![kael, elder, hara]);
 
-        // Village-centered layout on the 24×14 map.
-        // Citizens cluster on the open grass at (10, 8) — between Forest A (col 3–10,
-        // row 1–6), Forest B (col 12–16, row 7–12), and the river (col 17–19).
-        // Matches VILLAGE_CENTER in world.gd where the campfire landmark is drawn.
-        let starts: &[(i16, i16, u32)] = &[(9, 8, 3), (10, 9, 3), (11, 8, 3)];
+        // Village-centered layout on the 24×14 map (Sprint 12: SE flat area).
+        // Citizens cluster on the open grass at (21, 10) — east of the river
+        // (col 17–19), clear of Forest A (NW, col 3–10, row 1–6) and Forest B
+        // (SW, col 4–10, row 8–12). Matches VILLAGE_CENTER in world.gd where
+        // the campfire landmark is drawn.
+        let starts: &[(i16, i16, u32)] = &[(20, 10, 3), (21, 10, 3), (22, 10, 3)];
         for (i, &(x, y, r)) in starts.iter().enumerate() {
             if let Some(state) = world.move_states.get_mut(i) {
                 let pos = TilePos::new(x, y);
@@ -71,20 +72,22 @@ impl WorldNode {
         // Berry bushes: two in each forest zone (verified T_FOREST by hash in
         // terrain_builder.gd::get_terrain). Trees and bushes stack visually —
         // reads as "berries at the base of an oak".
-        world.add_resource(Resource::berry_bush(TilePos::new(5, 5)));   // Forest A
-        world.add_resource(Resource::berry_bush(TilePos::new(9, 5)));   // Forest A
-        world.add_resource(Resource::berry_bush(TilePos::new(13, 9)));  // Forest B
-        world.add_resource(Resource::berry_bush(TilePos::new(15, 10))); // Forest B
+        world.add_resource(Resource::berry_bush(TilePos::new(5, 5)));   // Forest A (NW)
+        world.add_resource(Resource::berry_bush(TilePos::new(9, 3)));   // Forest A (NW)
+        world.add_resource(Resource::berry_bush(TilePos::new(6, 10)));  // Forest B (SW)
+        world.add_resource(Resource::berry_bush(TilePos::new(9, 11)));  // Forest B (SW)
 
         // Water sources along the shallow river (col 17 and 19, T_SHALLOW).
-        world.add_resource(Resource::water_source(TilePos::new(17, 6)));
-        world.add_resource(Resource::water_source(TilePos::new(17, 9)));
-        world.add_resource(Resource::water_source(TilePos::new(19, 7)));
+        // Placed on col=19 near the SE village so citizens don't cross the deep
+        // middle channel (col=18) when drinking.
+        world.add_resource(Resource::water_source(TilePos::new(19, 9)));
+        world.add_resource(Resource::water_source(TilePos::new(19, 10)));
+        world.add_resource(Resource::water_source(TilePos::new(19, 11)));
 
         // Deer spread across biomes so hunting is visible from the village.
-        world.add_animal(Animal::deer(TilePos::new(4, 3)));   // Forest A
-        world.add_animal(Animal::deer(TilePos::new(13, 11))); // Forest B
-        world.add_animal(Animal::deer(TilePos::new(22, 5)));  // Open grass east of river
+        world.add_animal(Animal::deer(TilePos::new(5, 2)));   // Forest A (NW)
+        world.add_animal(Animal::deer(TilePos::new(7, 10)));  // Forest B (SW)
+        world.add_animal(Animal::deer(TilePos::new(22, 6)));  // Open grass NE near village
 
         self.world = Some(world);
     }

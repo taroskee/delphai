@@ -5,7 +5,9 @@ extends RefCounted
 ##
 ## - berry_bush: instance of `simple_nature_pack_glb.glb` → `Plant_01`
 ##   (falls back to a green sphere if GLB is missing)
-## - water_source: primitive CylinderMesh (no water mesh in the pack)
+## - water_source: cluster of 3× `Rock_01` from `simple_nature_pack_glb.glb`
+##   arranged in a ring — marks a water access point. No blue polygon
+##   (the pack has no water mesh; we use the GLB-only rule instead).
 ##
 ## The scalable root is stored as "mesh_inst" meta so world.gd can
 ## shrink it when the resource quantity depletes.
@@ -16,9 +18,10 @@ const BERRY_SCALE       := 0.25  # Plant_01 is ~2m tall in source; shrink to bus
 const BERRY_FB_COLOR    := Color(0.08, 0.55, 0.08)
 const BERRY_FB_RADIUS   := 0.4
 
-const WATER_COLOR       := Color(0.1, 0.45, 0.95)
-const WATER_RADIUS      := 0.5
-const WATER_HEIGHT      := 0.12
+const WATER_ROCK_NODE   := "Rock_01"
+const WATER_ROCK_COUNT  := 3
+const WATER_ROCK_RADIUS := 0.35
+const WATER_ROCK_SCALE  := 0.28
 
 static func make(kind: String, col: int, row: int, tile_size: float) -> Node3D:
 	var root := Node3D.new()
@@ -60,15 +63,16 @@ static func _make_berry_bush() -> Node3D:
 	return root
 
 static func _make_water_source() -> Node3D:
+	# Water access marker: ring of Rock_01 GLB instances. No custom polygon.
+	# If the GLB fails to load, the node is an invisible anchor (no fallback mesh)
+	# so the scene still runs without injecting a primitive shape.
 	var root := Node3D.new()
-	var mi := MeshInstance3D.new()
-	var cyl := CylinderMesh.new()
-	cyl.top_radius    = WATER_RADIUS
-	cyl.bottom_radius = WATER_RADIUS
-	cyl.height        = WATER_HEIGHT
-	mi.mesh = cyl
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = WATER_COLOR
-	mi.material_override = mat
-	root.add_child(mi)
+	for i in range(WATER_ROCK_COUNT):
+		var rock := GlbLoader.load_subscene(NATURE_GLB, WATER_ROCK_NODE)
+		if rock == null:
+			continue
+		var angle := TAU * float(i) / float(WATER_ROCK_COUNT)
+		rock.position = Vector3(cos(angle) * WATER_ROCK_RADIUS, 0.0, sin(angle) * WATER_ROCK_RADIUS)
+		rock.scale = Vector3.ONE * WATER_ROCK_SCALE
+		root.add_child(rock)
 	return root
