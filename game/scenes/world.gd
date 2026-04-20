@@ -85,6 +85,9 @@ func _ready() -> void:
 	_build_lighting()
 	_build_camera()
 	TerrainBuilder.build_terrain3d(self, tile_to_world(VILLAGE_CENTER_COL, VILLAGE_CENTER_ROW))
+	# Must run after build_terrain3d (samples heightmap) and before build_features
+	# / make_walkable_map (both query the cached classification).
+	TerrainBuilder.classify_tiles_from_height(MAP_WIDTH, MAP_HEIGHT, TILE_SIZE)
 	TerrainBuilder.build_collision_plane(self, MAP_WIDTH, MAP_HEIGHT, TILE_SIZE)
 	TerrainBuilder.build_features(self, MAP_WIDTH, MAP_HEIGHT, TILE_SIZE)
 	_world_sim.set_walkable_map(TerrainBuilder.make_walkable_map(MAP_WIDTH, MAP_HEIGHT), MAP_WIDTH, MAP_HEIGHT)

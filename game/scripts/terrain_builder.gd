@@ -46,8 +46,25 @@ const VILLAGE_FADE_RADIUS  := 15.0
 # returns 0.0 (flat world) — preserving the Sprint 13.01 seam behavior.
 static var _terrain: Terrain3D = null
 
+# Per-tile T_* cache populated by `classify_tiles_from_height`.
+# Until populated, `get_terrain` falls back to layout-based classification
+# (preserves boot-time behavior before world.gd has called classify).
+static var _tile_cache: PackedByteArray = PackedByteArray()
+static var _tile_cache_w: int = 0
+
 ## Classify a tile. `map_w`/`map_h` are inclusive of border walls.
+## After `classify_tiles_from_height` runs, returns cached value (O(1)).
+## Before then, falls through to layout-only classification.
 static func get_terrain(col: int, row: int, map_w: int, map_h: int) -> int:
+	if _tile_cache_w == map_w and _tile_cache.size() == map_w * map_h:
+		return _tile_cache[row * map_w + col]
+	return _classify_layout(col, row, map_w, map_h)
+
+## Layout-only classification (no height sampling). Source of truth for
+## river/forest/mountain-corner placement. The cache layer in
+## `classify_tiles_from_height` calls this and additionally promotes
+## tall procgen tiles to T_MOUNTAIN.
+static func _classify_layout(col: int, row: int, map_w: int, map_h: int) -> int:
 	if col == 0 or col == map_w - 1 or row == 0 or row == map_h - 1:
 		return T_MOUNTAIN
 	if col <= MOUNTAIN_CORNER_MAX and row <= MOUNTAIN_CORNER_MAX and col + row <= MOUNTAIN_DIAG_MAX:
@@ -64,6 +81,23 @@ static func get_terrain(col: int, row: int, map_w: int, map_h: int) -> int:
 		if (col * 13 + row * 23) % 4 < 3:
 			return T_FOREST
 	return T_GROUND
+
+## Build the per-tile T_* cache from layout + sampled procgen heights.
+## Must be called after `build_terrain3d` so `get_height_at` is populated.
+## Heights above MOUNTAIN_HEIGHT_THRESHOLD are promoted to T_MOUNTAIN so
+## procgen ridges block movement in addition to the layout border walls.
+const MOUNTAIN_HEIGHT_THRESHOLD := 3.0
+static func classify_tiles_from_height(map_w: int, map_h: int, tile_size: float) -> void:
+	_tile_cache.resize(map_w * map_h)
+	_tile_cache_w = map_w
+	for row in range(map_h):
+		for col in range(map_w):
+			var t := _classify_layout(col, row, map_w, map_h)
+			if t == T_GROUND or t == T_FOREST:
+				var h := get_height_at(col * tile_size, row * tile_size)
+				if h > MOUNTAIN_HEIGHT_THRESHOLD:
+					t = T_MOUNTAIN
+			_tile_cache[row * map_w + col] = t
 
 ## Single Y-source-of-truth for placing objects on the ground.
 ## Returns 0.0 until `build_terrain3d` has populated `_terrain`.
@@ -106,9 +140,17 @@ static func build_terrain3d(parent: Node3D, village_center: Vector3) -> Terrain3
 
 	var assets := Terrain3DAssets.new()
 	assets.set_texture(0, _create_grass_asset())
+	assets.set_texture(1, _create_dirt_asset())
 	terrain.assets = assets
 
 	parent.add_child(terrain)
+
+	# Auto-shader blends grass (texture 0) → dirt (texture 1) by slope, so
+	# procgen ridges are immediately visible without a hand-painted control map.
+	# Shader uniform names verified via `strings game/addons/terrain_3d/bin/libterrain.*.so`.
+	terrain.material.auto_shader = true
+	terrain.material.set_shader_param("auto_slope", 10.0)
+	terrain.material.set_shader_param("blend_sharpness", 0.975)
 
 	var img := _generate_heightmap(village_center)
 	terrain.data.import_images([img, null, null], Vector3.ZERO, 0.0, TERRAIN_HEIGHT_SCALE)
@@ -180,15 +222,26 @@ static func _generate_heightmap(village_center: Vector3) -> Image:
 			img.set_pixel(x, y, Color(h, 0.0, 0.0, 1.0))
 	return img
 
-## Single-color grass texture so Terrain3D renders a solid green surface.
-## Sprint 13.2 will upgrade this to multi-texture (grass/shallow/deep/mountain)
-## driven by the heightmap classifier.
+## Grass base texture (texture 0). Solid green; auto-shader picks this on
+## near-flat tiles. Slope-driven blend toward dirt (texture 1) reveals ridges.
 static func _create_grass_asset() -> Terrain3DTextureAsset:
 	var img := Image.create_empty(64, 64, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0.26, 0.52, 0.26, 1.0))
 	var tex := ImageTexture.create_from_image(img)
 	var ta := Terrain3DTextureAsset.new()
 	ta.name = "Grass"
+	ta.albedo_texture = tex
+	ta.uv_scale = 0.5
+	return ta
+
+## Dirt overlay texture (texture 1). Slope-driven auto-shader fades to this on
+## steep faces so procgen ridges read as brown ridges instead of flat green.
+static func _create_dirt_asset() -> Terrain3DTextureAsset:
+	var img := Image.create_empty(64, 64, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0.42, 0.30, 0.18, 1.0))
+	var tex := ImageTexture.create_from_image(img)
+	var ta := Terrain3DTextureAsset.new()
+	ta.name = "Dirt"
 	ta.albedo_texture = tex
 	ta.uv_scale = 0.5
 	return ta
