@@ -29,13 +29,15 @@ const FOREST_A_ROWS        := [1, 6]
 const FOREST_B_COLS        := [4, 10]   # SW — moved from [12,16] so the SE quadrant
 const FOREST_B_ROWS        := [8, 12]   # remains open flat grass for the village.
 
-# Terrain3D procgen parameters (Sprint 13.1).
+# Terrain3D procgen parameters (Sprint 13.1, adjusted 13.3).
 # Fixed seed keeps MVP reproducible; post-MVP randomizes this only.
+# freq 0.05→0.08 (shorter wavelength, steeper ridges) and height_scale 5→8
+# (taller noise) to make auto-shader slope blend active across the terrain.
 const TERRAIN_SEED         := 42
-const TERRAIN_NOISE_FREQ   := 0.05
+const TERRAIN_NOISE_FREQ   := 0.08
 const TERRAIN_REGION_SIZE  := 512    # meters per Terrain3DRegion
 const TERRAIN_IMAGE_SIZE   := 512    # heightmap pixels (1 px = 1 m)
-const TERRAIN_HEIGHT_SCALE := 5.0    # noise [-1, 1] → ±5 m world
+const TERRAIN_HEIGHT_SCALE := 8.0    # noise [-1, 1] → ±8 m world
 # Village flat-zone: within FLAT_RADIUS height is forced to 0 so citizens
 # spawn on a level plain. FADE_RADIUS smooths the transition back to noise.
 const VILLAGE_FLAT_RADIUS  := 10.0
@@ -148,8 +150,10 @@ static func build_terrain3d(parent: Node3D, village_center: Vector3) -> Terrain3
 	# Auto-shader blends grass (texture 0) → dirt (texture 1) by slope, so
 	# procgen ridges are immediately visible without a hand-painted control map.
 	# Shader uniform names verified via `strings game/addons/terrain_3d/bin/libterrain.*.so`.
+	# auto_slope=5 (down from 10) lowers blend threshold so more of the terrain
+	# matches the shader's slope condition (freq↑ & height_scale↑ make ridges steeper).
 	terrain.material.auto_shader = true
-	terrain.material.set_shader_param("auto_slope", 10.0)
+	terrain.material.set_shader_param("auto_slope", 5.0)
 	terrain.material.set_shader_param("blend_sharpness", 0.975)
 
 	var img := _generate_heightmap(village_center)
