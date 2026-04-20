@@ -1,22 +1,18 @@
 class_name CitizenFactory
 extends RefCounted
 
-## Builds a citizen Node3D (GLB-based placeholder) with name/behavior/chat labels.
+## Builds a chess-pawn citizen Node3D with name/behavior/chat labels.
 ##
-## The body visual is `Tree_Stump_01` from `simple_nature_pack_glb.glb` — a
-## human-sized stump used as a placeholder until a real human GLB is imported.
-## If the GLB fails to load, the citizen is a "ghost" (labels only, no body),
-## per the "everything GLB except the campfire" rule.
+## The body is a 3-part primitive (base disc + body pillar + head sphere).
+## Used as a placeholder until a real human GLB is imported. Reverted from
+## Tree_Stump_01 because the stump silhouette read as scenery, not as people.
 ##
 ## Meta keys set on the returned root:
-##   "body"     → body root Node3D (used by world.gd to tint via `modulate`
-##                for hungry/thirsty states; null if the GLB was missing)
+##   "mat"      → StandardMaterial3D used for all body parts (tinted by vitals)
 ##   "beh_lbl"  → behavior Label3D
 ##   "chat_lbl" → chat bubble Label3D (hidden by default)
 
-const NATURE_GLB    := "res://assets/nature/simple_nature_pack_glb.glb"
-const BODY_NODE     := "Tree_Stump_01"
-const BODY_SCALE    := 0.6   # Tree_Stump_01 is ~1m in source; shrink to citizen-size
+const BODY_COLOR    := Color(0.85, 0.65, 0.35)
 const LABEL_Y_NAME  := 1.15
 const LABEL_Y_BEH   := 1.40
 const LABEL_Y_CHAT  := 1.65
@@ -25,23 +21,43 @@ static func make(cname: String, idx: int) -> Node3D:
 	var root := Node3D.new()
 	root.name = "Citizen_%d" % idx
 
-	var body := _make_body()
-	if body != null:
-		root.add_child(body)
-	root.set_meta("body", body)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = BODY_COLOR
+	root.set_meta("mat", mat)
 
+	_add_pawn_body(root, mat)
 	_add_labels(root, cname)
 	return root
 
-static func _make_body() -> Node3D:
-	var glb_node := GlbLoader.load_subscene(NATURE_GLB, BODY_NODE)
-	if glb_node == null:
-		return null
-	var wrapper := Node3D.new()
-	wrapper.name = "CitizenBody"
-	glb_node.scale = Vector3.ONE * BODY_SCALE
-	wrapper.add_child(glb_node)
-	return wrapper
+static func _add_pawn_body(root: Node3D, mat: StandardMaterial3D) -> void:
+	var base_mi := MeshInstance3D.new()
+	var base_cyl := CylinderMesh.new()
+	base_cyl.top_radius    = 0.22
+	base_cyl.bottom_radius = 0.26
+	base_cyl.height        = 0.10
+	base_mi.mesh = base_cyl
+	base_mi.material_override = mat
+	base_mi.position.y = 0.05
+	root.add_child(base_mi)
+
+	var body_mi := MeshInstance3D.new()
+	var body_cyl := CylinderMesh.new()
+	body_cyl.top_radius    = 0.13
+	body_cyl.bottom_radius = 0.18
+	body_cyl.height        = 0.55
+	body_mi.mesh = body_cyl
+	body_mi.material_override = mat
+	body_mi.position.y = 0.38
+	root.add_child(body_mi)
+
+	var head_mi := MeshInstance3D.new()
+	var head_sphere := SphereMesh.new()
+	head_sphere.radius = 0.18
+	head_sphere.height = 0.36
+	head_mi.mesh = head_sphere
+	head_mi.material_override = mat
+	head_mi.position.y = 0.82
+	root.add_child(head_mi)
 
 static func _add_labels(root: Node3D, cname: String) -> void:
 	var name_lbl := Label3D.new()

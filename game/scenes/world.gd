@@ -349,36 +349,25 @@ func _update_citizens() -> void:
 	_update_animals()
 	_update_day_night()
 
-## Tint the GLB citizen body via its albedo materials.
-## Node3D has no `modulate`, so we reach into the Tree_Stump_01 mesh surfaces
-## prepared by GlbLoader and set albedo_color per-state.
-## Ghost citizens (body == null, GLB missing) are skipped.
-const CITIZEN_TINT_BODY_MATS := "_delphai_body_mats"
+## Tint the chess-pawn citizen body via its shared StandardMaterial3D.
+## Pawn primitives (citizen_factory.gd) all use one material stored under
+## the "mat" meta key, so a single albedo_color set recolors the whole body.
 const CITIZEN_TINT_HYDRATION_THRESHOLD := 0.3
 const CITIZEN_TINT_FED_THRESHOLD := 0.3
-const CITIZEN_TINT_THIRSTY  := Color(0.4, 0.6, 1.0)
-const CITIZEN_TINT_HUNGRY   := Color(1.0, 0.7, 0.4)
-const CITIZEN_TINT_NORMAL   := Color(1.0, 1.0, 1.0)
+const CITIZEN_TINT_THIRSTY  := Color(0.3, 0.5, 1.0)
+const CITIZEN_TINT_HUNGRY   := Color(1.0, 0.5, 0.15)
+const CITIZEN_TINT_NORMAL   := Color(0.85, 0.65, 0.35)
 
 func _tint_citizen_body(idx: int, fed: float, hyd: float) -> void:
-	var body: Node3D = _citizen_nodes[idx].get_meta("body")
-	if body == null:
+	var mat: StandardMaterial3D = _citizen_nodes[idx].get_meta("mat")
+	if mat == null:
 		return
-	var mats: Array
-	if body.has_meta(CITIZEN_TINT_BODY_MATS):
-		mats = body.get_meta(CITIZEN_TINT_BODY_MATS)
-	else:
-		mats = GlbLoader.prepare_fade_materials(body)
-		body.set_meta(CITIZEN_TINT_BODY_MATS, mats)
-	var color: Color
 	if hyd < CITIZEN_TINT_HYDRATION_THRESHOLD:
-		color = CITIZEN_TINT_THIRSTY
+		mat.albedo_color = CITIZEN_TINT_THIRSTY
 	elif fed < CITIZEN_TINT_FED_THRESHOLD:
-		color = CITIZEN_TINT_HUNGRY
+		mat.albedo_color = CITIZEN_TINT_HUNGRY
 	else:
-		color = CITIZEN_TINT_NORMAL
-	for mat in mats:
-		(mat as StandardMaterial3D).albedo_color = color
+		mat.albedo_color = CITIZEN_TINT_NORMAL
 
 func _update_day_night() -> void:
 	var tick: int = _world_sim.get_tick_count()
