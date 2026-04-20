@@ -26,6 +26,13 @@
 - 対策: プロンプト出力フォーマットはデフォルト YAML。JSON は使わない
 - **新メンバーへの指示**: LLM の出力は YAML で指定する（30% 速い、parse エラーなし）
 
+## [2026-04] [Godot3D] Terrain3D enum 名は推測せず addon バイナリで確認
+
+- 状況: Sprint 13.1 で `Terrain3DCollision.DYNAMIC` と書いて Godot Parser Error。readthedocs は 403
+- 原因: Terrain3D v1.0.1 の enum は `DISABLED / DYNAMIC_GAME / DYNAMIC_EDITOR / FULL_GAME / FULL_EDITOR`。`DYNAMIC` 単体は存在しない
+- 対策: addon バイナリ (`game/addons/terrain_3d/bin/libterrain.*.so`) の strings で enum 値を直接確認 → ランタイムは `DYNAMIC_GAME`
+- **新メンバーへの指示**: Terrain3D の enum / メソッド名は推測せず、`strings <so>` で確認するか `game/demo/CodeGeneratedDemo.tscn` を参照する
+
 ## [2026-04] [Godot3D] Terrain3D 固定 seed + force-flat オーバーレイで村を平坦化
 
 - 状況: Sprint 13.1 で FastNoiseLite ベースの ProcGen を導入した際、村 SE (21,10) が高低差の中腹に落ち、住民/焚き火が斜面に浮く or 沈む危険があった

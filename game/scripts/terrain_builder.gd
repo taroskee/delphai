@@ -113,7 +113,10 @@ static func build_terrain3d(parent: Node3D, village_center: Vector3) -> Terrain3
 	var img := _generate_heightmap(village_center)
 	terrain.data.import_images([img, null, null], Vector3.ZERO, 0.0, TERRAIN_HEIGHT_SCALE)
 
-	terrain.collision.mode = Terrain3DCollision.DYNAMIC
+	# Terrain3D v1.0.1: enum members are DISABLED / DYNAMIC_GAME / DYNAMIC_EDITOR
+	# / FULL_GAME / FULL_EDITOR. There is no plain `DYNAMIC`. Use DYNAMIC_GAME
+	# for runtime collision (DYNAMIC_EDITOR builds collision only inside the editor).
+	terrain.collision.mode = Terrain3DCollision.DYNAMIC_GAME
 
 	_terrain = terrain
 	return terrain
