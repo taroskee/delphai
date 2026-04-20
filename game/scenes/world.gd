@@ -90,12 +90,14 @@ func _ready() -> void:
 	# / make_walkable_map (both query the cached classification).
 	TerrainBuilder.classify_tiles_from_height(MAP_WIDTH, MAP_HEIGHT, TILE_SIZE)
 	TerrainBuilder.build_collision_plane(self, MAP_WIDTH, MAP_HEIGHT, TILE_SIZE)
-	TerrainBuilder.build_features(self, MAP_WIDTH, MAP_HEIGHT, TILE_SIZE)
+	# Sprint 13.R0: strip non-human entities to establish a clean visual baseline.
+	# Re-enable once R4 terrain verification passes.
+	# TerrainBuilder.build_features(self, MAP_WIDTH, MAP_HEIGHT, TILE_SIZE)
 	_world_sim.set_walkable_map(TerrainBuilder.make_walkable_map(MAP_WIDTH, MAP_HEIGHT), MAP_WIDTH, MAP_HEIGHT)
-	VillageBuilder.add_campfire(self, tile_to_world(VILLAGE_CENTER_COL, VILLAGE_CENTER_ROW))
-	_build_resources()
+	# VillageBuilder.add_campfire(self, tile_to_world(VILLAGE_CENTER_COL, VILLAGE_CENTER_ROW))
+	# _build_resources()
 	_build_citizens()
-	_build_animals()
+	# _build_animals()
 	_build_debug_ui()
 	_build_notify_label()
 	_build_bgm()
@@ -398,7 +400,8 @@ func _check_births() -> void:
 		_show_notify("New citizen born: " + cname + "!")
 
 func _update_resources() -> void:
-	var count: int = _world_sim.get_resource_count()
+	# Sprint 13.R0: may be empty when _build_resources is disabled.
+	var count: int = _resource_meshes.size()
 	for i in range(count):
 		var qty: float = _world_sim.get_resource_quantity(i)
 		if qty <= 0.0:
@@ -408,7 +411,8 @@ func _update_resources() -> void:
 			_resource_meshes[i].scale = Vector3(qty, qty, qty)
 
 func _update_animals() -> void:
-	var count: int = _world_sim.get_animal_count()
+	# Sprint 13.R0: may be empty when _build_animals is disabled.
+	var count: int = _animal_nodes.size()
 	for i in range(count):
 		var fled: bool = _world_sim.pop_animal_fled(i)
 		var alive: bool = _world_sim.get_animal_alive(i)
