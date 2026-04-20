@@ -1,7 +1,9 @@
 # CLAUDE.md
 
-> 書くのは「新しいチームメンバーが初日に間違えること」だけ
-> AIが既に知っていることは書かない
+## 全体ドキュメントルール
+
+書くのは「新しいチームメンバーが初日に間違えること」だけ
+AIが既に知っていることは書かない
 
 ## 言語
 
@@ -13,21 +15,24 @@ Thinking, coding and git-commiting in English
 1. **検証なき完了なし** - 動くことを証明してコミット
 2. **不具合はテストで再現してから直す** - テストなき修正は技術的負債
 3. **計画に合意するまで実装しない** - 進展ないなら手を止めて再計画
-4. **副作用を排除** - 可変型より不変型、継承より移譲
+4. **副作用を排除** - 可変型より不変型、継承より委譲
 5. **不確実*選択の自由=価値** - SOLID、抽象クラスよりプロトコル、ただしKISS/YAGNI
 
-## AIが間違えやすいこと
+## AIが間違えやすいことランキング
 
-- CI落ちやバグ報告に対して人間に聞くな - 「DEBUG-CRITICALレベルでログを設定し、ログ/エラー/テストを見てAIで解決しろ」
-- ハック的な修正で済ませる - 「今知っていることを全て踏まえ、エレガントに実装し直せ」
+1. ハック的な修正で済ませるな - 「今知っていることを全て踏まえ、エレガントに実装し直せ」
+2. 修正しておいて2度も同じバグを発生させるな - 「2連続で失敗したら作業を止めて、人間に相談しろ」
+3. CI落ちやバグ報告について人間に聞くな - 「DEBUGレベルからログを設定し、ログ/エラー/テストを見てAIで解決しろ」
+4. タスクの起点になる情報源のパス/URLを忘れるな - 「再取得に労力を使わず、`@tasks/todo.md`に場所を記載しておけ」
 
 ## 検証コマンド
 
-以下、検証の順番3つ
+以下、検証の順番4つ
 
-1. 型検査
-2. テスト
-3. lint
+1. Godot MCPエラー確認
+2. 型検査
+3. テスト
+4. lint
 
 検証完了後は、Gitコミット、プッシュ(AuthorにClaude Codeは記述しない)
 
@@ -38,8 +43,8 @@ Thinking, coding and git-commiting in English
 
 ## 自己改善
 
-AIがミスしたら `tasks/lessons.md` に記録し、本ファイルの更新を提案する
+AIがミスしたら `@tasks/lessons.md` に記録し、本ファイルの更新を提案する
 
 ## 参照 (必要な時だけ読め)
 
-CI/CD含:`@docs/testing.md`|`@docs/architecture.md`|セキュリティ`@docs/secure-by-design.md`|戦略と意思決定:`@docs/wardley-map.md`|CLAUDE.md運用:`@docs/context-engineering.md`|教訓:`@tasks/lessons.md`|現タスク:`@tasks/todo.md`
+教訓:`@tasks/lessons.md`|現タスク:`@tasks/todo.md`|CLAUDE.md運用:`@docs/context-engineering.md`|CI/CD含:`@docs/testing.md`|`@docs/architecture-rule.md`|セキュリティ`@docs/secure-by-design.md`|戦略と意思決定:`@docs/wardley-map.md`|アーキテクチャ`@docs/CODEMAPS/`

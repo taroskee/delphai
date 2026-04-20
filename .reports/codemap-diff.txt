@@ -1,0 +1,39 @@
+Codemap generation report
+Generated: 2026-04-20
+Working dir: /workspaces/delphai
+Branch: main (HEAD: bc0a2c9)
+
+=== Action ===
+Initial generation. No previous codemaps existed under docs/CODEMAPS/.
+5 new files created:
+  - docs/CODEMAPS/architecture.md   (~1200 tokens, Mermaid C4 Context/Container/Component + sequence)
+  - docs/CODEMAPS/backend.md        (~1000 tokens, Rust core module map)
+  - docs/CODEMAPS/frontend.md       (~950 tokens, Godot scene + GDScript map)
+  - docs/CODEMAPS/data.md           (~800 tokens, ERD + state machines + constants)
+  - docs/CODEMAPS/dependencies.md   (~700 tokens, crate/addon/service deps)
+
+=== Files scanned ===
+Rust core (8 files, ~2125 lines):
+  crates/delphai-core/src/{lib,world,pathfinding,animal,resource,tech}.rs
+  crates/delphai-core/src/agent/{mod,behavior,citizen,conversation}.rs
+  crates/delphai-core/src/llm/{mod,provider,player2,queue,prompt,response_parser,memory}.rs
+Rust FFI (1 file, 460 lines):
+  crates/delphai-gdext/src/lib.rs
+Godot (8 files, ~1284 lines):
+  game/scenes/world.gd
+  game/scripts/{terrain_builder,citizen_factory,animal_factory,resource_factory,village_builder,glb_loader,debug_hud}.gd
+Build config (3 files):
+  Cargo.toml, crates/*/Cargo.toml
+
+=== Architectural notes captured ===
+- Two-layer split: GDScript (rendering/input) | Rust core (pure sim) with gdext FFI as the single boundary.
+- delphai-core has NO dependency on the `godot` crate — this is the invariant that keeps tests pure.
+- Sub-tick interpolation lives in Rust (`MoveState.prev_tile_pos` + `World::get_citizen_world_pos`).
+- LLM subsystem is the only network boundary; preserved as-is during planned rebuild.
+- World state is pure in-memory parallel Vecs; no persistence layer yet.
+
+=== Rebuild scope note (per user instruction) ===
+User intent: "LLM以外の全体をゼロから作り直す" (rebuild everything except LLM).
+Preserved crates/modules: crates/delphai-core/src/llm/*, its tokio/reqwest/serde_yaml deps.
+To rewrite from scratch: world, pathfinding, agent (non-LLM parts), animal, resource, tech,
+  gdext FFI surface, and the entire game/ GDScript layer.
