@@ -2,15 +2,18 @@ class_name TerrainBuilder
 extends RefCounted
 
 ## Pure builder for the terrain grid and its walkable bitmap.
-## All methods are static — no state lives on this class except `_terrain`,
-## which holds the live Terrain3D node so `get_height_at` can query it.
+## Sprint 13.R redesign: heightmap is a composite shape
+## (gentle_noise + two Gaussian mountains + sine-curve river trench +
+##  village flat overlay), not pure noise. Tile classification is
+## height-driven (no more hardcoded river columns).
 ##
 ## `world.gd` calls `build_collision_plane`, `build_terrain3d`,
-## `build_features`, and `make_walkable_map` during setup.
+## `build_river_water`, `classify_tiles_from_height`, `build_features`,
+## and `make_walkable_map` during setup.
 ##
-## `get_height_at(x, z)` is the single Y-source-of-truth for placing objects
-## on the ground. Before `build_terrain3d` has run it returns 0.0; afterwards
-## it samples Terrain3DData.
+## `get_height_at(x, z)` is the single Y-source-of-truth for placing
+## objects on the ground. Before `build_terrain3d` has run it returns
+## 0.0; afterwards it samples Terrain3DData.
 
 # Terrain codes
 const T_GROUND   := 0
@@ -19,63 +22,83 @@ const T_SHALLOW  := 2
 const T_DEEP     := 3
 const T_MOUNTAIN := 4
 
-# Layout zones (named constants replace inline magic numbers).
-const RIVER_DEEP_COL       := 18
-const RIVER_SHALLOW_COLS   := [17, 19]
-const MOUNTAIN_CORNER_MAX  := 4   # col,row ≤ this
-const MOUNTAIN_DIAG_MAX    := 6   # col+row ≤ this
-const FOREST_A_COLS        := [3, 10]  # inclusive range — NW
-const FOREST_A_ROWS        := [1, 6]
-const FOREST_B_COLS        := [4, 10]   # SW — moved from [12,16] so the SE quadrant
-const FOREST_B_ROWS        := [8, 12]   # remains open flat grass for the village.
+# Forest zones — layout rules only. `classify_tiles_from_height` promotes
+# any FOREST tile whose Gaussian-mountain height exceeds the threshold to
+# T_MOUNTAIN, so trees only spawn on the gentle-slope remainder.
+const FOREST_A_COLS := [3, 10]   # NW zone (upslope of Mountain 1)
+const FOREST_A_ROWS := [1, 6]
+const FOREST_B_COLS := [4, 10]   # SW zone (left bank of the river)
+const FOREST_B_ROWS := [8, 12]
 
-# Terrain3D procgen parameters (Sprint 13.1, adjusted 13.3).
-# Fixed seed keeps MVP reproducible; post-MVP randomizes this only.
-# freq 0.05→0.08 (shorter wavelength, steeper ridges) and height_scale 5→8
-# (taller noise) to make auto-shader slope blend active across the terrain.
+# ── Terrain3D composite-shape parameters (Sprint 13.R1) ───────────────────────
+# Fixed seed keeps the MVP reproducible; post-MVP will randomize.
 const TERRAIN_SEED         := 42
-const TERRAIN_NOISE_FREQ   := 0.08
 const TERRAIN_REGION_SIZE  := 512    # meters per Terrain3DRegion
 const TERRAIN_IMAGE_SIZE   := 512    # heightmap pixels (1 px = 1 m)
-const TERRAIN_HEIGHT_SCALE := 8.0    # noise [-1, 1] → ±8 m world
-# Village flat-zone: within FLAT_RADIUS height is forced to 0 so citizens
-# spawn on a level plain. FADE_RADIUS smooths the transition back to noise.
-const VILLAGE_FLAT_RADIUS  := 10.0
-const VILLAGE_FADE_RADIUS  := 15.0
+# Raw heightmap value ∈ [-1, 1] is multiplied by HEIGHT_SCALE to give world
+# Y. 20 gives room for 15m mountains and 2m river trenches simultaneously.
+const TERRAIN_HEIGHT_SCALE := 20.0
+
+# Base meadow noise — very gentle so mountains and the river read clearly.
+const BASE_NOISE_FREQ  := 0.06
+const BASE_NOISE_AMP_M := 0.6       # peak-to-peak meters
+
+# Two Gaussian mountains in the N part of the map. Positions are world-space
+# meters matching heightmap pixel coordinates (1 px = 1 m).
+const MOUNTAIN_1_POS      := Vector2(6.0, 4.0)
+const MOUNTAIN_1_HEIGHT_M := 15.0
+const MOUNTAIN_1_SIGMA_M  := 7.0
+const MOUNTAIN_2_POS      := Vector2(28.0, 4.0)
+const MOUNTAIN_2_HEIGHT_M := 12.0
+const MOUNTAIN_2_SIGMA_M  := 9.0
+
+# Winding river: centerline x as a function of z runs roughly N→S across the
+# map, weaving west of the village (which sits at col 21 ≈ x=42).
+# river_x(z) = BASE + AMP * sin(z * FREQ) + SLOPE * z
+const RIVER_X_BASE         := 20.0
+const RIVER_X_AMP          := 4.0
+const RIVER_X_FREQ         := 0.2
+const RIVER_X_SLOPE        := 0.15
+const RIVER_TRENCH_WIDTH_M := 3.0    # lateral half-width of the trench
+const RIVER_TRENCH_DEPTH_M := 2.0    # center depth below surrounding meadow
+
+# Village flat overlay — within FLAT_RADIUS the heightmap is forced to 0 so
+# citizens spawn on level ground. FADE_RADIUS linearly blends back to the
+# composite shape.
+const VILLAGE_FLAT_RADIUS := 10.0
+const VILLAGE_FADE_RADIUS := 15.0
+
+# Height-driven tile classification thresholds (Sprint 13.R3)
+const MOUNTAIN_HEIGHT_THRESHOLD := 3.0
+const DEEP_HEIGHT_THRESHOLD     := -1.2
+const SHALLOW_HEIGHT_THRESHOLD  := -0.3
+
+# River water mesh (Sprint 13.R2) — a flat strip threading through the trench.
+# Width equals the trench width at mid-depth so water touches both banks.
+const RIVER_WATER_WIDTH_M := 3.0
+const RIVER_WATER_Y       := -1.0   # midway between trench lip (0) and bottom (-2)
 
 # Held so `get_height_at(x, z)` can sample the live Terrain3D.data.
-# Remains null until `build_terrain3d` runs, in which case `get_height_at`
-# returns 0.0 (flat world) — preserving the Sprint 13.01 seam behavior.
 static var _terrain: Terrain3D = null
 
-# Per-tile T_* cache populated by `classify_tiles_from_height`.
-# Until populated, `get_terrain` falls back to layout-based classification
-# (preserves boot-time behavior before world.gd has called classify).
+# Per-tile T_* cache populated by `classify_tiles_from_height`. Until it
+# runs, `get_terrain` falls back to layout-only classification.
 static var _tile_cache: PackedByteArray = PackedByteArray()
 static var _tile_cache_w: int = 0
 
-## Classify a tile. `map_w`/`map_h` are inclusive of border walls.
-## After `classify_tiles_from_height` runs, returns cached value (O(1)).
-## Before then, falls through to layout-only classification.
+## Classify a tile. After `classify_tiles_from_height` runs, returns the
+## cached value in O(1); before then, falls through to layout-only rules.
 static func get_terrain(col: int, row: int, map_w: int, map_h: int) -> int:
 	if _tile_cache_w == map_w and _tile_cache.size() == map_w * map_h:
 		return _tile_cache[row * map_w + col]
 	return _classify_layout(col, row, map_w, map_h)
 
-## Layout-only classification (no height sampling). Source of truth for
-## river/forest/mountain-corner placement. The cache layer in
-## `classify_tiles_from_height` calls this and additionally promotes
-## tall procgen tiles to T_MOUNTAIN.
+## Layout-only classification — borders + forest zones.
+## Mountain/river classes now come exclusively from sampled heights in
+## `classify_tiles_from_height` (no hardcoded columns).
 static func _classify_layout(col: int, row: int, map_w: int, map_h: int) -> int:
 	if col == 0 or col == map_w - 1 or row == 0 or row == map_h - 1:
 		return T_MOUNTAIN
-	if col <= MOUNTAIN_CORNER_MAX and row <= MOUNTAIN_CORNER_MAX and col + row <= MOUNTAIN_DIAG_MAX:
-		return T_MOUNTAIN
-	if row >= 1 and row <= map_h - 2:
-		if col == RIVER_DEEP_COL:
-			return T_DEEP
-		if col in RIVER_SHALLOW_COLS:
-			return T_SHALLOW
 	if col >= FOREST_A_COLS[0] and col <= FOREST_A_COLS[1] and row >= FOREST_A_ROWS[0] and row <= FOREST_A_ROWS[1]:
 		if (col * 17 + row * 31) % 4 < 3:
 			return T_FOREST
@@ -84,11 +107,11 @@ static func _classify_layout(col: int, row: int, map_w: int, map_h: int) -> int:
 			return T_FOREST
 	return T_GROUND
 
-## Build the per-tile T_* cache from layout + sampled procgen heights.
+## Build the per-tile T_* cache from layout + sampled composite heights.
 ## Must be called after `build_terrain3d` so `get_height_at` is populated.
-## Heights above MOUNTAIN_HEIGHT_THRESHOLD are promoted to T_MOUNTAIN so
-## procgen ridges block movement in addition to the layout border walls.
-const MOUNTAIN_HEIGHT_THRESHOLD := 3.0
+## GROUND/FOREST tiles whose height falls in a mountain/river band are
+## promoted so movement and water behave consistently with the visible
+## terrain.
 static func classify_tiles_from_height(map_w: int, map_h: int, tile_size: float) -> void:
 	_tile_cache.resize(map_w * map_h)
 	_tile_cache_w = map_w
@@ -99,22 +122,20 @@ static func classify_tiles_from_height(map_w: int, map_h: int, tile_size: float)
 				var h := get_height_at(col * tile_size, row * tile_size)
 				if h > MOUNTAIN_HEIGHT_THRESHOLD:
 					t = T_MOUNTAIN
+				elif h < DEEP_HEIGHT_THRESHOLD:
+					t = T_DEEP
+				elif h < SHALLOW_HEIGHT_THRESHOLD:
+					t = T_SHALLOW
 			_tile_cache[row * map_w + col] = t
 
 ## Single Y-source-of-truth for placing objects on the ground.
-## Returns 0.0 until `build_terrain3d` has populated `_terrain`.
-## After procgen, samples Terrain3DData; NaN results (sampled outside a
-## region) fall back to 0.0 so callers never get a poisoned Y.
 static func get_height_at(x: float, z: float) -> float:
 	if _terrain == null:
 		return 0.0
 	var h: float = _terrain.data.get_height(Vector3(x, 0.0, z))
 	return 0.0 if is_nan(h) else h
 
-## Build the invisible collision plane under `parent`. Only physics — no visual.
-## Terrain3D owns the primary collision; this BoxShape3D is a flat fallback
-## ensuring characters cannot fall through in case Terrain3DCollision fails
-## to initialize or heightmap generation produces NaN outside the region.
+## Invisible collision plane — flat fallback if Terrain3DCollision fails.
 static func build_collision_plane(parent: Node3D, map_w: int, map_h: int, tile_size: float) -> void:
 	var body := StaticBody3D.new()
 	body.name = "Terrain"
@@ -132,9 +153,8 @@ static func build_collision_plane(parent: Node3D, map_w: int, map_h: int, tile_s
 	body.add_child(col_shape)
 
 ## Build a procedurally-generated Terrain3D under `parent`.
-## Replaces the deprecated terrian.glb backdrop. Heightmap is seeded
-## FastNoiseLite forced flat within VILLAGE_FLAT_RADIUS of `village_center`,
-## so citizens spawned at the village tile stand on level ground.
+## Heightmap = gentle_noise + mountain_1 + mountain_2 + river_trench
+## (village_flat_overlay on top).
 static func build_terrain3d(parent: Node3D, village_center: Vector3) -> Terrain3D:
 	var terrain := Terrain3D.new()
 	terrain.name = "Terrain3D"
@@ -147,31 +167,76 @@ static func build_terrain3d(parent: Node3D, village_center: Vector3) -> Terrain3
 
 	parent.add_child(terrain)
 
-	# Auto-shader blends grass (texture 0) → dirt (texture 1) by slope, so
-	# procgen ridges are immediately visible without a hand-painted control map.
-	# Shader uniform names verified via `strings game/addons/terrain_3d/bin/libterrain.*.so`.
-	# auto_slope=5 (down from 10) lowers blend threshold so more of the terrain
-	# matches the shader's slope condition (freq↑ & height_scale↑ make ridges steeper).
+	# Auto-shader blends grass (tex 0) → dirt (tex 1) by slope so Gaussian
+	# mountain flanks read as brown ridges against the green meadow.
+	# auto_slope=15 matches the ~52° slope produced at Gaussian σ with the
+	# current height/sigma (Sprint 13.R4 calibration).
 	terrain.material.auto_shader = true
-	terrain.material.set_shader_param("auto_slope", 5.0)
-	terrain.material.set_shader_param("blend_sharpness", 0.975)
+	terrain.material.set_shader_param("auto_slope", 15.0)
+	terrain.material.set_shader_param("blend_sharpness", 0.85)
 
 	var img := _generate_heightmap(village_center)
 	terrain.data.import_images([img, null, null], Vector3.ZERO, 0.0, TERRAIN_HEIGHT_SCALE)
 
-	# Terrain3D v1.0.1: enum members are DISABLED / DYNAMIC_GAME / DYNAMIC_EDITOR
-	# / FULL_GAME / FULL_EDITOR. There is no plain `DYNAMIC`. Use DYNAMIC_GAME
-	# for runtime collision (DYNAMIC_EDITOR builds collision only inside the editor).
+	# Terrain3D v1.0.1: enum is DISABLED / DYNAMIC_GAME / DYNAMIC_EDITOR
+	# / FULL_GAME / FULL_EDITOR. Use DYNAMIC_GAME for runtime collision.
 	terrain.collision.mode = Terrain3DCollision.DYNAMIC_GAME
 
 	_terrain = terrain
 	return terrain
 
+## Build a blue water strip following the river trench centerline.
+## Procedural triangle strip so the mesh hugs the sine curve without
+## seams or rotated-plane gaps. `map_length_z` is the playable z-extent
+## in world meters.
+static func build_river_water(parent: Node3D, map_length_z: float) -> void:
+	var container := Node3D.new()
+	container.name = "RiverWater"
+	parent.add_child(container)
+
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	var half_w := RIVER_WATER_WIDTH_M * 0.5
+	var step := 1.0
+	var z := 0.0
+	var have_prev := false
+	var prev_left := Vector3.ZERO
+	var prev_right := Vector3.ZERO
+
+	while z <= map_length_z:
+		var rx := _river_x_at(z)
+		# Tangent from finite difference, then perpendicular in XZ plane.
+		var tangent := Vector2(_river_x_at(z + 0.1) - rx, 0.1).normalized()
+		var normal := Vector2(-tangent.y, tangent.x)
+
+		var left := Vector3(rx + normal.x * half_w, RIVER_WATER_Y, z + normal.y * half_w)
+		var right := Vector3(rx - normal.x * half_w, RIVER_WATER_Y, z - normal.y * half_w)
+
+		if have_prev:
+			st.add_vertex(prev_left)
+			st.add_vertex(prev_right)
+			st.add_vertex(right)
+			st.add_vertex(prev_left)
+			st.add_vertex(right)
+			st.add_vertex(left)
+
+		prev_left = left
+		prev_right = right
+		have_prev = true
+		z += step
+
+	st.generate_normals()
+	var mesh := st.commit()
+
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = _create_water_material()
+	container.add_child(mi)
+
 ## Build trees per-tile under a new "TerrainFeatures" node.
-## Mountains, shallow/deep water, and the green ground plane are now fully
-## expressed by the Terrain3D heightmap — we no longer add primitive polygons
-## for them. The walkable bitmap still classifies T_MOUNTAIN and T_DEEP as
-## blocked.
+## Trees spawn only where the composite height stayed in the walkable
+## band (mountains/river have already claimed steep/deep tiles).
 static func build_features(parent: Node3D, map_w: int, map_h: int, tile_size: float) -> void:
 	var container := Node3D.new()
 	container.name = "TerrainFeatures"
@@ -196,38 +261,74 @@ static func make_walkable_map(map_w: int, map_h: int) -> PackedByteArray:
 			data[row * map_w + col] = 0 if (t == T_DEEP or t == T_MOUNTAIN) else 1
 	return data
 
-# ── Private terrain builders ──────────────────────────────────────────────────
+# ── Private shape helpers ─────────────────────────────────────────────────────
 
-## Seeded FastNoiseLite heightmap with a flattened disc around the village.
-## Image is FORMAT_RF; each pixel stores raw noise ∈ [-1, 1] in the R channel.
-## `import_images` multiplies by TERRAIN_HEIGHT_SCALE later.
+## River centerline x at world-space z. Shared between heightmap generation
+## and water-mesh tessellation so both follow exactly the same curve.
+static func _river_x_at(z: float) -> float:
+	return RIVER_X_BASE + RIVER_X_AMP * sin(z * RIVER_X_FREQ) + RIVER_X_SLOPE * z
+
+## Composite heightmap. FORMAT_RF stores raw noise in [-1, 1]; Terrain3D
+## multiplies by TERRAIN_HEIGHT_SCALE on import.
 static func _generate_heightmap(village_center: Vector3) -> Image:
 	var noise := FastNoiseLite.new()
 	noise.seed = TERRAIN_SEED
-	noise.frequency = TERRAIN_NOISE_FREQ
+	noise.frequency = BASE_NOISE_FREQ
 
 	var size := TERRAIN_IMAGE_SIZE
 	var img := Image.create_empty(size, size, false, Image.FORMAT_RF)
+
 	var vx := village_center.x
 	var vz := village_center.z
 	var flat_r2 := VILLAGE_FLAT_RADIUS * VILLAGE_FLAT_RADIUS
 	var fade_r2 := VILLAGE_FADE_RADIUS * VILLAGE_FADE_RADIUS
+
+	var base_noise_amp_raw := BASE_NOISE_AMP_M / TERRAIN_HEIGHT_SCALE
+	var m1_amp_raw := MOUNTAIN_1_HEIGHT_M / TERRAIN_HEIGHT_SCALE
+	var m1_two_sigma2 := 2.0 * MOUNTAIN_1_SIGMA_M * MOUNTAIN_1_SIGMA_M
+	var m2_amp_raw := MOUNTAIN_2_HEIGHT_M / TERRAIN_HEIGHT_SCALE
+	var m2_two_sigma2 := 2.0 * MOUNTAIN_2_SIGMA_M * MOUNTAIN_2_SIGMA_M
+	var trench_amp_raw := RIVER_TRENCH_DEPTH_M / TERRAIN_HEIGHT_SCALE
+
 	for y in range(size):
+		var wz := float(y)
+		var rx := _river_x_at(wz)
 		for x in range(size):
-			var dx := float(x) - vx
-			var dz := float(y) - vz
-			var d2 := dx * dx + dz * dz
-			var h := noise.get_noise_2d(float(x), float(y))
+			var wx := float(x)
+
+			# Gentle meadow base.
+			var h := noise.get_noise_2d(wx, wz) * base_noise_amp_raw
+
+			# Mountain 1 (Gaussian bump)
+			var dx1 := wx - MOUNTAIN_1_POS.x
+			var dz1 := wz - MOUNTAIN_1_POS.y
+			h += m1_amp_raw * exp(-(dx1 * dx1 + dz1 * dz1) / m1_two_sigma2)
+
+			# Mountain 2
+			var dx2 := wx - MOUNTAIN_2_POS.x
+			var dz2 := wz - MOUNTAIN_2_POS.y
+			h += m2_amp_raw * exp(-(dx2 * dx2 + dz2 * dz2) / m2_two_sigma2)
+
+			# River trench — triangular profile, deepest at centerline.
+			var river_dist := absf(wx - rx)
+			if river_dist < RIVER_TRENCH_WIDTH_M:
+				h -= (1.0 - river_dist / RIVER_TRENCH_WIDTH_M) * trench_amp_raw
+
+			# Village flat overlay (applied last so it wins over shape+noise).
+			var vdx := wx - vx
+			var vdz := wz - vz
+			var d2 := vdx * vdx + vdz * vdz
 			if d2 <= flat_r2:
 				h = 0.0
 			elif d2 < fade_r2:
 				var t := (sqrt(d2) - VILLAGE_FLAT_RADIUS) / (VILLAGE_FADE_RADIUS - VILLAGE_FLAT_RADIUS)
 				h *= t
-			img.set_pixel(x, y, Color(h, 0.0, 0.0, 1.0))
+
+			img.set_pixel(x, y, Color(clampf(h, -1.0, 1.0), 0.0, 0.0, 1.0))
 	return img
 
-## Grass base texture (texture 0). Solid green; auto-shader picks this on
-## near-flat tiles. Slope-driven blend toward dirt (texture 1) reveals ridges.
+# ── Private material / asset factories ───────────────────────────────────────
+
 static func _create_grass_asset() -> Terrain3DTextureAsset:
 	var img := Image.create_empty(64, 64, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0.26, 0.52, 0.26, 1.0))
@@ -238,8 +339,6 @@ static func _create_grass_asset() -> Terrain3DTextureAsset:
 	ta.uv_scale = 0.5
 	return ta
 
-## Dirt overlay texture (texture 1). Slope-driven auto-shader fades to this on
-## steep faces so procgen ridges read as brown ridges instead of flat green.
 static func _create_dirt_asset() -> Terrain3DTextureAsset:
 	var img := Image.create_empty(64, 64, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0.42, 0.30, 0.18, 1.0))
@@ -250,7 +349,15 @@ static func _create_dirt_asset() -> Terrain3DTextureAsset:
 	ta.uv_scale = 0.5
 	return ta
 
-# ── Private feature builders ──────────────────────────────────────────────────
+static func _create_water_material() -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.25, 0.45, 0.75, 0.85)
+	mat.metallic = 0.2
+	mat.roughness = 0.35
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	return mat
+
+# ── Private feature builders ─────────────────────────────────────────────────
 
 const TREE_GLB       := "res://assets/nature/simple_nature_pack_glb.glb"
 const TREE_NODE_NAME := "Oak_Tree_01"
