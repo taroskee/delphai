@@ -1,0 +1,14 @@
+[gd_scene format=3 uid="uid://bqwn4rxhgk3lp"]
+
+[ext_resource type="Script" path="res://scenes/world.gd" id="1_root"]
+
+[node name="World" type="Node3D"]
+script = ExtResource("1_root")
+
+[node name="WorldNode" type="WorldNode" parent="."]
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.707107, 0.707107, 0, -0.707107, 0.707107, 0, 10, 0)
+shadow_enabled = true
+
+[node name="Citizens" type="Node3D" parent="."]

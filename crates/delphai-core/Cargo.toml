@@ -12,3 +12,4 @@ serde_yaml.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 thiserror.workspace = true
+rand.workspace = true

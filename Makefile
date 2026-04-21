@@ -1,4 +1,6 @@
-.PHONY: build build-mac build-linux check test clean
+.PHONY: build build-mac build-linux check test smoke-citizen clean
+
+GODOT ?= godot
 
 # Linux build (run inside devcontainer)
 build-linux:
@@ -27,6 +29,12 @@ check:
 
 test:
 	cargo test
+
+# Sprint N4 smoke: headless で住民が連続して動くことを確認（マス目移動regression guard）
+# 事前に make build（or build-mac）を済ませておくこと。
+smoke-citizen:
+	@command -v $(GODOT) >/dev/null 2>&1 || { echo "godot binary not found; set GODOT=/path/to/godot"; exit 1; }
+	cd game && $(GODOT) --headless --script res://scripts/tests/smoke_citizen_motion.gd
 
 clean:
 	cargo clean

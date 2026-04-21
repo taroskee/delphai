@@ -3,7 +3,7 @@
 // the lint can't see through the macro so we silence it crate-wide.
 
 use delphai_core::pathfinding::TilePos;
-use delphai_core::world::World;
+use delphai_core::world::{MapBounds, World};
 use godot::prelude::*;
 
 struct DelphaiExtension;
@@ -45,12 +45,19 @@ impl INode for WorldNode {
 
 #[godot_api]
 impl WorldNode {
-    /// Spawn the minimal village for Sprint N4 smoke test: one citizen walking
-    /// along x. Called from GDScript `_ready`.
+    /// Spawn the minimal village for Sprint N4 smoke test and enable a
+    /// deterministic random walk so the citizen keeps moving after reaching
+    /// any target. `bounds` clamps target tiles to `0..width × 0..height`.
     #[func]
-    fn initialize(&mut self) {
-        let idx = self.world.spawn_citizen("Alice", TilePos::new(0, 0));
-        self.world.set_move_target(idx, TilePos::new(10, 0));
+    fn initialize(&mut self, width: i32, height: i32, seed: i64) {
+        self.world.spawn_citizen("Alice", TilePos::new(0, 0));
+        self.world.enable_random_walk(
+            seed as u64,
+            MapBounds {
+                width: width.clamp(1, i16::MAX as i32) as i16,
+                height: height.clamp(1, i16::MAX as i32) as i16,
+            },
+        );
     }
 
     #[func]
