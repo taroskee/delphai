@@ -31,11 +31,8 @@ impl MoveState {
         }
         let dx = (target.x - self.tile_pos.x).signum();
         let dy = (target.y - self.tile_pos.y).signum();
-        if dx != 0 {
-            self.tile_pos.x += dx;
-        } else if dy != 0 {
-            self.tile_pos.y += dy;
-        }
+        self.tile_pos.x += dx;
+        self.tile_pos.y += dy;
         if self.tile_pos == target {
             self.move_target = None;
         }
@@ -74,26 +71,60 @@ mod tests {
     }
 
     #[test]
-    fn step_moves_x_first_then_y() {
+    fn step_moves_diagonally_when_both_axes_need_to_change() {
         let mut m = MoveState::new(TilePos::new(0, 0));
-        m.move_target = Some(TilePos::new(1, 1));
-        m.step();
-        assert_eq!(m.tile_pos, TilePos::new(1, 0));
+        m.move_target = Some(TilePos::new(3, 3));
         m.step();
         assert_eq!(m.tile_pos, TilePos::new(1, 1));
+        m.step();
+        assert_eq!(m.tile_pos, TilePos::new(2, 2));
+        m.step();
+        assert_eq!(m.tile_pos, TilePos::new(3, 3));
         assert_eq!(m.move_target, None, "target cleared on arrival");
     }
 
     #[test]
-    fn step_toward_negative_target() {
+    fn step_moves_diagonally_toward_negative_target() {
         let mut m = MoveState::new(TilePos::new(0, 0));
-        m.move_target = Some(TilePos::new(-2, -1));
+        m.move_target = Some(TilePos::new(-2, -2));
         m.step();
-        assert_eq!(m.tile_pos, TilePos::new(-1, 0));
+        assert_eq!(m.tile_pos, TilePos::new(-1, -1));
         m.step();
-        assert_eq!(m.tile_pos, TilePos::new(-2, 0));
+        assert_eq!(m.tile_pos, TilePos::new(-2, -2));
+        assert_eq!(m.move_target, None);
+    }
+
+    #[test]
+    fn step_falls_back_to_axis_step_when_only_one_axis_differs() {
+        let mut m = MoveState::new(TilePos::new(5, 5));
+        m.move_target = Some(TilePos::new(5, 2));
         m.step();
-        assert_eq!(m.tile_pos, TilePos::new(-2, -1));
+        assert_eq!(m.tile_pos, TilePos::new(5, 4));
+        m.step();
+        assert_eq!(m.tile_pos, TilePos::new(5, 3));
+        m.step();
+        assert_eq!(m.tile_pos, TilePos::new(5, 2));
+
+        let mut n = MoveState::new(TilePos::new(0, 0));
+        n.move_target = Some(TilePos::new(3, 0));
+        n.step();
+        assert_eq!(n.tile_pos, TilePos::new(1, 0));
+        n.step();
+        assert_eq!(n.tile_pos, TilePos::new(2, 0));
+        n.step();
+        assert_eq!(n.tile_pos, TilePos::new(3, 0));
+    }
+
+    #[test]
+    fn step_diagonal_then_axis_when_target_is_not_equidistant() {
+        let mut m = MoveState::new(TilePos::new(0, 0));
+        m.move_target = Some(TilePos::new(3, 1));
+        m.step();
+        assert_eq!(m.tile_pos, TilePos::new(1, 1));
+        m.step();
+        assert_eq!(m.tile_pos, TilePos::new(2, 1));
+        m.step();
+        assert_eq!(m.tile_pos, TilePos::new(3, 1));
     }
 
     #[test]

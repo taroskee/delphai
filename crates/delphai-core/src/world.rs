@@ -188,8 +188,9 @@ mod tests {
     fn citizen_never_static_for_more_than_two_consecutive_ticks_during_journey() {
         let mut w = World::new();
         let idx = w.spawn_citizen("Mover", TilePos::new(0, 0));
-        // Manhattan distance 20 — journey exceeds 16 ticks so target is not reached.
-        w.set_move_target(idx, TilePos::new(10, 10));
+        // Chebyshev distance 20 (dx=dy=20) — journey exceeds 16 ticks so target is
+        // not reached within the loop and every tick must move diagonally.
+        w.set_move_target(idx, TilePos::new(20, 20));
 
         let mut consecutive_static: u32 = 0;
         let mut last_pos = w.citizen_moves[idx].tile_pos;
