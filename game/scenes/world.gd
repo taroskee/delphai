@@ -29,6 +29,17 @@ const OBSTACLE_TILES: Array[Vector2i] = [
 const OBSTACLE_HEIGHT: float = 1.2
 const GROUND_Y: float = 0.0
 
+# Sprint N6: hand-picked berry bush tiles. Rust side owns gameplay logic — this
+# list just seeds `set_berry_tiles` and drives the visual meshes. Keep tiles
+# walkable (not on OBSTACLE_TILES) so a citizen can reach adjacency.
+const BERRY_TILES: Array[Vector2i] = [
+	Vector2i(3, 3),
+	Vector2i(20, 4),
+	Vector2i(10, 11),
+]
+const BERRY_Y: float = 0.5
+const BERRY_MAX_AMOUNT: float = 5.0  # mirrors core::resource::BERRY_AMOUNT_MAX
+
 # Camera tunables — copied verbatim from Sprint 13.R0 world.gd.
 const CAM_ZOOM_MIN := 10.0
 const CAM_ZOOM_MAX := 200.0
@@ -47,9 +58,12 @@ const CAM_KEY_ACCEL_RAMP := 1.5
 @onready var _world_node: Node = $WorldNode
 @onready var _citizens_parent: Node3D = $Citizens
 @onready var _terrain_parent: Node3D = $Terrain
+@onready var _berries_parent: Node3D = $Berries
 
 var _tick_accum: float = 0.0
 var _citizen_nodes: Array[Node3D] = []
+var _berry_nodes: Array[Node3D] = []
+var _berry_mats: Array[StandardMaterial3D] = []
 
 var _cam: Camera3D = null
 var _cam_dragging: bool = false
@@ -58,7 +72,9 @@ var _key_pan_hold: float = 0.0
 func _ready() -> void:
 	_world_node.initialize(MAP_WIDTH, MAP_HEIGHT, RANDOM_WALK_SEED)
 	_build_terrain_and_obstacles()
+	_seed_berries()
 	_spawn_citizen_visuals()
+	_spawn_berry_visuals()
 	_build_camera()
 
 func _build_terrain_and_obstacles() -> void:
@@ -103,6 +119,33 @@ func _build_terrain_and_obstacles() -> void:
 		)
 		_terrain_parent.add_child(cube)
 	_world_node.set_walkable_map(MAP_WIDTH, MAP_HEIGHT, cells)
+
+func _seed_berries() -> void:
+	# Flatten [(x, y), ...] to [x0, y0, x1, y1, ...] for the Rust FFI.
+	var packed := PackedInt32Array()
+	packed.resize(BERRY_TILES.size() * 2)
+	for i in BERRY_TILES.size():
+		packed[i * 2] = BERRY_TILES[i].x
+		packed[i * 2 + 1] = BERRY_TILES[i].y
+	_world_node.set_berry_tiles(packed)
+
+func _spawn_berry_visuals() -> void:
+	var count: int = _world_node.get_resource_count()
+	for i in count:
+		var pos2: Vector2 = _world_node.get_resource_world_pos(i)
+		var mesh_inst := MeshInstance3D.new()
+		mesh_inst.name = "Berry%d" % i
+		var sphere := SphereMesh.new()
+		sphere.radius = 0.35
+		sphere.height = 0.7
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = Color(0.85, 0.15, 0.25)  # berry red
+		sphere.material = mat
+		mesh_inst.mesh = sphere
+		mesh_inst.position = Vector3(pos2.x * TILE_SIZE, BERRY_Y, pos2.y * TILE_SIZE)
+		_berries_parent.add_child(mesh_inst)
+		_berry_nodes.append(mesh_inst)
+		_berry_mats.append(mat)
 
 func _spawn_citizen_visuals() -> void:
 	var count: int = _world_node.get_citizen_count()
@@ -197,3 +240,15 @@ func _process(delta: float) -> void:
 	for i in _citizen_nodes.size():
 		var pos2: Vector2 = _world_node.get_citizen_world_pos(i, alpha)
 		_citizen_nodes[i].position = Vector3(pos2.x * TILE_SIZE, CITIZEN_Y, pos2.y * TILE_SIZE)
+	_update_berry_visuals()
+
+func _update_berry_visuals() -> void:
+	for i in _berry_nodes.size():
+		var amount: float = _world_node.get_resource_amount(i)
+		var ratio: float = clampf(amount / BERRY_MAX_AMOUNT, 0.0, 1.0)
+		# Shrink an empty bush to 30% and fade toward grey so depletion reads.
+		var scale: float = lerpf(0.3, 1.0, ratio)
+		_berry_nodes[i].scale = Vector3(scale, scale, scale)
+		_berry_mats[i].albedo_color = Color(0.85, 0.15, 0.25).lerp(
+			Color(0.5, 0.5, 0.5), 1.0 - ratio
+		)

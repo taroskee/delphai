@@ -3,6 +3,7 @@
 // the lint can't see through the macro so we silence it crate-wide.
 
 use delphai_core::pathfinding::TilePos;
+use delphai_core::resource::Resource;
 use delphai_core::world::{MapBounds, World};
 use godot::prelude::*;
 
@@ -24,6 +25,35 @@ fn citizen_world_pos_at(world: &World, i: i64, alpha: f32) -> Option<(f32, f32)>
         return None;
     }
     Some(world.get_citizen_world_pos(idx, alpha))
+}
+
+fn citizen_fed_at(world: &World, i: i64) -> Option<f32> {
+    let idx = usize::try_from(i).ok()?;
+    world.citizen_vitals.get(idx).map(|v| v.fed)
+}
+
+fn resource_tile_at(world: &World, i: i64) -> Option<TilePos> {
+    let idx = usize::try_from(i).ok()?;
+    world.resources.get(idx).map(|r| r.tile_pos)
+}
+
+fn resource_amount_at(world: &World, i: i64) -> Option<f32> {
+    let idx = usize::try_from(i).ok()?;
+    world.resources.get(idx).map(|r| r.amount)
+}
+
+/// Decode a flat `[x0, y0, x1, y1, ...]` i32 sequence into Berry resources.
+/// Odd-length inputs drop the trailing coordinate. Out-of-range (i16) values
+/// are clamped so a bad Godot-side constant can't panic the extension.
+fn berry_resources_from_i32_pairs(tiles: &[i32]) -> Vec<Resource> {
+    tiles
+        .chunks_exact(2)
+        .map(|pair| {
+            let x = pair[0].clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            let y = pair[1].clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            Resource::new_berry(TilePos::new(x, y))
+        })
+        .collect()
 }
 
 #[derive(GodotClass)]
@@ -104,6 +134,43 @@ impl WorldNode {
             None => Vector2::ZERO,
         }
     }
+
+    /// Seed berry resources from a flat `[x0, y0, x1, y1, ...]` Int32 array.
+    /// Replaces any previously-set resources.
+    #[func]
+    fn set_berry_tiles(&mut self, tiles: PackedInt32Array) {
+        let raw: Vec<i32> = (0..tiles.len()).map(|i| tiles.get(i).unwrap_or(0)).collect();
+        self.world.set_resources(berry_resources_from_i32_pairs(&raw));
+    }
+
+    #[func]
+    fn get_resource_count(&self) -> i64 {
+        self.world.resources.len() as i64
+    }
+
+    /// Tile-space position of resource `i`. Godot side scales by `TILE_SIZE`
+    /// (same convention as `get_citizen_world_pos`).
+    #[func]
+    fn get_resource_world_pos(&self, i: i64) -> Vector2 {
+        match resource_tile_at(&self.world, i) {
+            Some(t) => Vector2::new(t.x as f32, t.y as f32),
+            None => Vector2::ZERO,
+        }
+    }
+
+    /// Remaining berry amount for resource `i`. Useful for driving visual
+    /// regeneration/depletion feedback (scale, color).
+    #[func]
+    fn get_resource_amount(&self, i: i64) -> f32 {
+        resource_amount_at(&self.world, i).unwrap_or(0.0)
+    }
+
+    /// Fullness of citizen `i` in `[0.0, 1.0]`. Returns `0.0` for out-of-range
+    /// indices (mirrors `get_citizen_world_pos`'s silent fallback).
+    #[func]
+    fn get_citizen_fed(&self, i: i64) -> f32 {
+        citizen_fed_at(&self.world, i).unwrap_or(0.0)
+    }
 }
 
 #[cfg(test)]
@@ -152,6 +219,56 @@ mod tests {
         let w = make_world_with_one_citizen_moving();
         assert!(citizen_world_pos_at(&w, 1, 0.0).is_none());
         assert!(citizen_world_pos_at(&w, -1, 0.0).is_none());
+    }
+
+    #[test]
+    fn citizen_fed_at_returns_default_for_new_citizen() {
+        let w = make_world_with_one_citizen_moving();
+        assert_eq!(citizen_fed_at(&w, 0), Some(1.0));
+    }
+
+    #[test]
+    fn citizen_fed_at_returns_none_for_bad_index() {
+        let w = make_world_with_one_citizen_moving();
+        assert_eq!(citizen_fed_at(&w, 5), None);
+        assert_eq!(citizen_fed_at(&w, -1), None);
+    }
+
+    #[test]
+    fn berry_resources_from_i32_pairs_parses_coordinate_pairs() {
+        let out = berry_resources_from_i32_pairs(&[3, 4, 10, 12]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].tile_pos, TilePos::new(3, 4));
+        assert_eq!(out[1].tile_pos, TilePos::new(10, 12));
+    }
+
+    #[test]
+    fn berry_resources_from_i32_pairs_drops_unpaired_tail() {
+        let out = berry_resources_from_i32_pairs(&[1, 2, 9]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].tile_pos, TilePos::new(1, 2));
+    }
+
+    #[test]
+    fn berry_resources_from_i32_pairs_clamps_out_of_range_to_i16_bounds() {
+        let out = berry_resources_from_i32_pairs(&[i32::MAX, i32::MIN]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].tile_pos, TilePos::new(i16::MAX, i16::MIN));
+    }
+
+    #[test]
+    fn resource_tile_at_returns_seeded_position() {
+        let mut w = World::new();
+        w.set_resources(vec![Resource::new_berry(TilePos::new(7, 9))]);
+        assert_eq!(resource_tile_at(&w, 0), Some(TilePos::new(7, 9)));
+        assert_eq!(resource_tile_at(&w, 1), None);
+        assert_eq!(resource_tile_at(&w, -1), None);
+    }
+
+    #[test]
+    fn resource_amount_at_returns_none_for_bad_index() {
+        let w = World::new();
+        assert_eq!(resource_amount_at(&w, 0), None);
     }
 
     #[test]

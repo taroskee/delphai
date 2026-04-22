@@ -1,6 +1,8 @@
+use crate::agent::behavior::{decide, BehaviorAction, BehaviorState, Vitals};
 use crate::agent::Citizen;
 use crate::move_state::MoveState;
 use crate::pathfinding::{TilePos, WalkGrid};
+use crate::resource::Resource;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use std::collections::VecDeque;
@@ -8,6 +10,14 @@ use std::collections::VecDeque;
 /// Per-citizen recent-tile buffer. Used by `step_with_grid` to break detour
 /// ties — candidates NOT in this buffer beat candidates that are in it.
 const HISTORY_LEN: usize = 8;
+
+/// Per-tick hunger drain. 0.004/tick ≈ full→empty in 250 ticks (~62s at 4Hz)
+/// — slow enough to observe idle behavior, fast enough that feeding matters.
+pub const FED_DECAY: f32 = 0.004;
+
+/// How much `fed` a citizen gains from pulling `GATHER_PER_TICK=1.0` from a
+/// berry bush. 0.2 → five ticks of gathering refills a starving citizen.
+pub const FED_GAIN_PER_GATHER: f32 = 0.2;
 
 /// Bounds for random-walk target selection: target tiles are clamped to
 /// `0..width` × `0..height`.
@@ -35,6 +45,13 @@ pub struct World {
     /// Per-citizen recent-tile buffer (bounded to `HISTORY_LEN`). Index-parallel
     /// with `citizens` / `citizen_moves`. Updated every tick AFTER stepping.
     citizen_history: Vec<VecDeque<TilePos>>,
+    /// Index-parallel with `citizens`. Drained by `FED_DECAY` each tick; refilled
+    /// when the citizen gathers from a resource.
+    pub citizen_vitals: Vec<Vitals>,
+    /// Index-parallel with `citizens`. Persisted between ticks so `decide` can
+    /// implement hysteresis (e.g. stay Gathering even once fed ≥ FED_LOW).
+    pub citizen_behaviors: Vec<BehaviorState>,
+    pub resources: Vec<Resource>,
 }
 
 impl World {
@@ -66,12 +83,46 @@ impl World {
 
     pub fn tick(&mut self) {
         self.tick_count += 1;
+
+        // 1. Drain hunger. Done before `decide` so a citizen that just dropped
+        //    below FED_LOW this tick immediately starts SeekingFood.
+        for v in &mut self.citizen_vitals {
+            v.fed = (v.fed - FED_DECAY).max(0.0);
+        }
+
+        // 2. Per-citizen behavior decision → act. `decide` is pure; the effects
+        //    (set move_target, gather, bump fed) happen here.
+        for i in 0..self.citizens.len() {
+            let citizen_tile = self.citizen_moves[i].tile_pos();
+            let vitals = self.citizen_vitals[i];
+            let state = self.citizen_behaviors[i];
+            let nearest = nearest_non_depleted_berry(&self.resources, citizen_tile);
+            let (new_state, action) = decide(state, vitals, citizen_tile, nearest);
+            self.citizen_behaviors[i] = new_state;
+            match action {
+                BehaviorAction::Idle => {}
+                BehaviorAction::SeekFood { target } => {
+                    self.citizen_moves[i].move_target = Some(target);
+                }
+                BehaviorAction::Gather { resource_idx } => {
+                    // Stop moving while gathering so the citizen doesn't drift
+                    // off the resource tile mid-harvest.
+                    self.citizen_moves[i].move_target = None;
+                    if let Some(r) = self.resources.get_mut(resource_idx) {
+                        let taken = r.gather();
+                        if taken > 0.0 {
+                            self.citizen_vitals[i].fed =
+                                (self.citizen_vitals[i].fed + FED_GAIN_PER_GATHER * taken).min(1.0);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Step movement (obstacle-aware when a grid is installed).
         if let Some(grid) = self.walk_grid.as_ref() {
             for (i, m) in self.citizen_moves.iter_mut().enumerate() {
                 let history = self.citizen_history.get(i).map(|d| d.as_slices());
-                // Flatten VecDeque into a temporary Vec so we can hand a single
-                // &[TilePos] to step_with_grid (two-slice form is ergonomic
-                // only for iteration, not `contains`).
                 let hist_vec: Vec<TilePos> = match history {
                     Some((a, b)) => a.iter().chain(b.iter()).copied().collect(),
                     None => Vec::new(),
@@ -83,6 +134,9 @@ impl World {
                 m.step();
             }
         }
+
+        // 4. Update per-citizen tile history (post-step so the current tile
+        //    isn't confused with the tile we started on).
         for (i, m) in self.citizen_moves.iter().enumerate() {
             if let Some(hist) = self.citizen_history.get_mut(i) {
                 let tp = m.tile_pos();
@@ -94,20 +148,38 @@ impl World {
                 }
             }
         }
+
+        // 5. Regenerate resources. Done last so this tick's gathers don't
+        //    partially refill the bush we just pulled from.
+        for r in &mut self.resources {
+            r.regenerate();
+        }
+
+        // 6. Random walk only re-targets citizens that are idle (no target,
+        //    not gathering). Gathering citizens intentionally have move_target=None.
         if let Some(rw) = self.random_walk.as_mut() {
             let grid = self.walk_grid.as_ref();
-            for m in &mut self.citizen_moves {
-                if m.move_target.is_none() {
-                    m.move_target =
-                        Some(pick_random_target_on_grid(&mut rw.rng, m.tile_pos(), rw.bounds, grid));
+            for (i, m) in self.citizen_moves.iter_mut().enumerate() {
+                let is_idle_behavior = matches!(
+                    self.citizen_behaviors.get(i),
+                    Some(BehaviorState::Idle) | None
+                );
+                if m.move_target.is_none() && is_idle_behavior {
+                    m.move_target = Some(pick_random_target_on_grid(
+                        &mut rw.rng,
+                        m.tile_pos(),
+                        rw.bounds,
+                        grid,
+                    ));
                 }
             }
         }
     }
 
     /// Spawn a new citizen at `tile_pos`. Returns the index in `citizens` /
-    /// `citizen_moves` / `citizen_history` (kept in parallel — never reorder
-    /// one without the others).
+    /// `citizen_moves` / `citizen_history` / `citizen_vitals` /
+    /// `citizen_behaviors` (kept in parallel — never reorder one without the
+    /// others).
     pub fn spawn_citizen(&mut self, name: impl Into<String>, tile_pos: TilePos) -> usize {
         let idx = self.citizens.len();
         self.citizens.push(Citizen {
@@ -120,7 +192,16 @@ impl World {
         });
         self.citizen_moves.push(MoveState::new(tile_pos));
         self.citizen_history.push(VecDeque::with_capacity(HISTORY_LEN));
+        self.citizen_vitals.push(Vitals::default());
+        self.citizen_behaviors.push(BehaviorState::default());
         idx
+    }
+
+    /// Replace all resources in one shot. Intended for initial seeding from
+    /// the gdext layer; callers that want to mutate individual entries should
+    /// access `self.resources` directly.
+    pub fn set_resources(&mut self, resources: Vec<Resource>) {
+        self.resources = resources;
     }
 
     pub fn set_move_target(&mut self, idx: usize, target: TilePos) {
@@ -133,6 +214,27 @@ impl World {
     pub fn get_citizen_world_pos(&self, idx: usize, alpha: f32) -> (f32, f32) {
         self.citizen_moves[idx].world_pos(alpha)
     }
+}
+
+/// Nearest non-depleted berry to `from`, by squared Euclidean distance on
+/// tile coordinates. Returns `(resource_index, tile)` so `decide` can emit a
+/// `Gather { resource_idx }` directly. Depleted resources are skipped so a
+/// starving citizen doesn't wander to an empty bush while a full one is
+/// closer.
+fn nearest_non_depleted_berry(
+    resources: &[Resource],
+    from: TilePos,
+) -> Option<(usize, TilePos)> {
+    resources
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| !r.is_depleted())
+        .min_by_key(|(_, r)| {
+            let dx = i32::from(r.tile_pos.x) - i32::from(from.x);
+            let dy = i32::from(r.tile_pos.y) - i32::from(from.y);
+            dx * dx + dy * dy
+        })
+        .map(|(i, r)| (i, r.tile_pos))
 }
 
 /// Pick a fresh target tile distinct from `current` within `bounds`, optionally
@@ -426,5 +528,152 @@ mod tests {
         };
         assert_eq!(run(123), run(123));
         assert_ne!(run(123), run(456));
+    }
+
+    // --- Sprint N6: Vitals + Behavior + Resources -------------------------
+
+    #[test]
+    fn spawn_citizen_initializes_vitals_and_behavior() {
+        let mut w = World::new();
+        let idx = w.spawn_citizen("Hungry", TilePos::new(0, 0));
+        assert!((w.citizen_vitals[idx].fed - 1.0).abs() < 1e-6);
+        assert_eq!(w.citizen_behaviors[idx], BehaviorState::Idle);
+    }
+
+    #[test]
+    fn tick_drains_fed_by_fed_decay() {
+        let mut w = World::new();
+        let idx = w.spawn_citizen("Faster", TilePos::new(0, 0));
+        let before = w.citizen_vitals[idx].fed;
+        w.tick();
+        let after = w.citizen_vitals[idx].fed;
+        assert!((before - after - FED_DECAY).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fed_clamps_at_zero_after_long_starvation() {
+        let mut w = World::new();
+        let _idx = w.spawn_citizen("Starving", TilePos::new(0, 0));
+        // 1.0 / 0.004 = 250 ticks to empty. Run well past.
+        for _ in 0..400 {
+            w.tick();
+        }
+        assert!(w.citizen_vitals[0].fed >= 0.0);
+        assert!(w.citizen_vitals[0].fed < 1e-6);
+    }
+
+    #[test]
+    fn set_resources_replaces_resource_list() {
+        let mut w = World::new();
+        w.set_resources(vec![
+            Resource::new_berry(TilePos::new(3, 3)),
+            Resource::new_berry(TilePos::new(7, 1)),
+        ]);
+        assert_eq!(w.resources.len(), 2);
+        assert_eq!(w.resources[0].tile_pos, TilePos::new(3, 3));
+        assert_eq!(w.resources[1].tile_pos, TilePos::new(7, 1));
+    }
+
+    #[test]
+    fn hungry_citizen_walks_toward_berry_and_gathers() {
+        // Citizen at (0,0) hungry, berry at (3,0). Citizen should walk over and
+        // refill fed. Start with fed just below FED_LOW so the state machine
+        // immediately chooses SeekingFood.
+        let mut w = World::new();
+        let idx = w.spawn_citizen("Hungry", TilePos::new(0, 0));
+        w.set_walkable_map(10, 10, vec![true; 100]);
+        w.set_resources(vec![Resource::new_berry(TilePos::new(3, 0))]);
+        w.citizen_vitals[idx].fed = 0.3; // below FED_LOW=0.4
+
+        let start_fed = w.citizen_vitals[idx].fed;
+
+        for _ in 0..60 {
+            w.tick();
+        }
+
+        // Should have reached the berry and gathered enough to get above
+        // FED_LOW again.
+        assert!(
+            w.citizen_vitals[idx].fed > start_fed,
+            "citizen did not refill (fed={})",
+            w.citizen_vitals[idx].fed
+        );
+    }
+
+    #[test]
+    fn berry_amount_decreases_when_citizen_gathers() {
+        let mut w = World::new();
+        let idx = w.spawn_citizen("Hungry", TilePos::new(3, 3));
+        w.set_walkable_map(10, 10, vec![true; 100]);
+        w.set_resources(vec![Resource::new_berry(TilePos::new(3, 3))]);
+        w.citizen_vitals[idx].fed = 0.1;
+
+        let start_amount = w.resources[0].amount;
+        // A few ticks of gathering (plus regen) should still net-negative.
+        for _ in 0..3 {
+            w.tick();
+        }
+        assert!(
+            w.resources[0].amount < start_amount,
+            "berry amount did not decrease (before={}, after={})",
+            start_amount,
+            w.resources[0].amount
+        );
+    }
+
+    #[test]
+    fn well_fed_citizen_ignores_nearby_berry() {
+        // Fully fed citizen should not rush to a berry — should stay idle (or
+        // random-walk). Verify behavior state never switches to SeekingFood.
+        let mut w = World::new();
+        let idx = w.spawn_citizen("Sated", TilePos::new(0, 0));
+        w.set_walkable_map(10, 10, vec![true; 100]);
+        w.set_resources(vec![Resource::new_berry(TilePos::new(1, 0))]);
+        // fed stays high for the whole run (20 ticks * 0.004 = 0.08 drain).
+        for _ in 0..20 {
+            w.tick();
+            assert_eq!(
+                w.citizen_behaviors[idx],
+                BehaviorState::Idle,
+                "well-fed citizen should stay Idle"
+            );
+        }
+    }
+
+    #[test]
+    fn depleted_berry_regenerates_over_time() {
+        let mut w = World::new();
+        w.set_resources(vec![Resource::new_berry(TilePos::new(0, 0))]);
+        w.resources[0].amount = 0.0;
+        for _ in 0..300 {
+            w.tick();
+        }
+        assert!(
+            w.resources[0].amount > 0.0,
+            "berry should have regenerated some amount"
+        );
+    }
+
+    #[test]
+    fn gathering_citizen_does_not_wander_off_via_random_walk() {
+        // With random walk enabled, a Gathering citizen should not have a
+        // move_target reassigned (behavior state is not Idle).
+        let mut w = World::new();
+        let idx = w.spawn_citizen("Forager", TilePos::new(3, 3));
+        w.set_walkable_map(10, 10, vec![true; 100]);
+        w.set_resources(vec![Resource::new_berry(TilePos::new(3, 3))]);
+        w.enable_random_walk(42, MapBounds { width: 10, height: 10 });
+        w.citizen_vitals[idx].fed = 0.1;
+
+        // After a few ticks the citizen should be Gathering and have no target.
+        for _ in 0..5 {
+            w.tick();
+        }
+        if w.citizen_behaviors[idx] == BehaviorState::Gathering {
+            assert!(
+                w.citizen_moves[idx].move_target.is_none(),
+                "Gathering citizen should have no move target"
+            );
+        }
     }
 }

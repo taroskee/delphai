@@ -14,3 +14,5 @@ shadow_enabled = true
 [node name="Terrain" type="Node3D" parent="."]
 
 [node name="Citizens" type="Node3D" parent="."]
+
+[node name="Berries" type="Node3D" parent="."]
