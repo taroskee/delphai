@@ -1,8 +1,13 @@
 use crate::agent::Citizen;
 use crate::move_state::MoveState;
-use crate::pathfinding::TilePos;
+use crate::pathfinding::{TilePos, WalkGrid};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
+use std::collections::VecDeque;
+
+/// Per-citizen recent-tile buffer. Used by `step_with_grid` to break detour
+/// ties — candidates NOT in this buffer beat candidates that are in it.
+const HISTORY_LEN: usize = 8;
 
 /// Bounds for random-walk target selection: target tiles are clamped to
 /// `0..width` × `0..height`.
@@ -26,6 +31,10 @@ pub struct World {
     pub citizens: Vec<Citizen>,
     pub citizen_moves: Vec<MoveState>,
     random_walk: Option<RandomWalk>,
+    walk_grid: Option<WalkGrid>,
+    /// Per-citizen recent-tile buffer (bounded to `HISTORY_LEN`). Index-parallel
+    /// with `citizens` / `citizen_moves`. Updated every tick AFTER stepping.
+    citizen_history: Vec<VecDeque<TilePos>>,
 }
 
 impl World {
@@ -44,22 +53,61 @@ impl World {
         });
     }
 
+    /// Install a walkable grid. When present, `tick()` uses `step_with_grid`
+    /// (obstacle-aware) and random-walk target picks only walkable tiles.
+    /// `cells` is row-major, length `width * height`.
+    pub fn set_walkable_map(&mut self, width: i16, height: i16, cells: Vec<bool>) {
+        self.walk_grid = Some(WalkGrid::from_row_major(width, height, cells));
+    }
+
+    pub fn walk_grid(&self) -> Option<&WalkGrid> {
+        self.walk_grid.as_ref()
+    }
+
     pub fn tick(&mut self) {
         self.tick_count += 1;
-        for m in &mut self.citizen_moves {
-            m.step();
+        if let Some(grid) = self.walk_grid.as_ref() {
+            for (i, m) in self.citizen_moves.iter_mut().enumerate() {
+                let history = self.citizen_history.get(i).map(|d| d.as_slices());
+                // Flatten VecDeque into a temporary Vec so we can hand a single
+                // &[TilePos] to step_with_grid (two-slice form is ergonomic
+                // only for iteration, not `contains`).
+                let hist_vec: Vec<TilePos> = match history {
+                    Some((a, b)) => a.iter().chain(b.iter()).copied().collect(),
+                    None => Vec::new(),
+                };
+                m.step_with_grid(grid, &hist_vec);
+            }
+        } else {
+            for m in &mut self.citizen_moves {
+                m.step();
+            }
+        }
+        for (i, m) in self.citizen_moves.iter().enumerate() {
+            if let Some(hist) = self.citizen_history.get_mut(i) {
+                let tp = m.tile_pos();
+                if hist.back() != Some(&tp) {
+                    if hist.len() == HISTORY_LEN {
+                        hist.pop_front();
+                    }
+                    hist.push_back(tp);
+                }
+            }
         }
         if let Some(rw) = self.random_walk.as_mut() {
+            let grid = self.walk_grid.as_ref();
             for m in &mut self.citizen_moves {
                 if m.move_target.is_none() {
-                    m.move_target = Some(pick_random_target(&mut rw.rng, m.tile_pos(), rw.bounds));
+                    m.move_target =
+                        Some(pick_random_target_on_grid(&mut rw.rng, m.tile_pos(), rw.bounds, grid));
                 }
             }
         }
     }
 
     /// Spawn a new citizen at `tile_pos`. Returns the index in `citizens` /
-    /// `citizen_moves` (kept in parallel — never reorder one without the other).
+    /// `citizen_moves` / `citizen_history` (kept in parallel — never reorder
+    /// one without the others).
     pub fn spawn_citizen(&mut self, name: impl Into<String>, tile_pos: TilePos) -> usize {
         let idx = self.citizens.len();
         self.citizens.push(Citizen {
@@ -71,6 +119,7 @@ impl World {
             divine_awareness: 0.0,
         });
         self.citizen_moves.push(MoveState::new(tile_pos));
+        self.citizen_history.push(VecDeque::with_capacity(HISTORY_LEN));
         idx
     }
 
@@ -86,25 +135,41 @@ impl World {
     }
 }
 
-/// Pick a fresh target tile distinct from `current` within `bounds`. Kept free
-/// so tests can drive it directly without constructing a World.
-fn pick_random_target(rng: &mut SmallRng, current: TilePos, bounds: MapBounds) -> TilePos {
-    // With width/height ≥ 2 the rejection loop is bounded in expectation; clamp
-    // to 1 so we never divide by zero, but in that degenerate case the only
-    // available tile is `current` so we just return it.
+/// Pick a fresh target tile distinct from `current` within `bounds`, optionally
+/// constrained to walkable tiles. Kept free so tests can drive it directly
+/// without constructing a World.
+///
+/// If `grid` is provided and the current tile is inside bounds but no walkable
+/// tile ≠ current exists, this falls back to `current` after a bounded number
+/// of attempts — better than looping forever on pathological maps.
+fn pick_random_target_on_grid(
+    rng: &mut SmallRng,
+    current: TilePos,
+    bounds: MapBounds,
+    grid: Option<&WalkGrid>,
+) -> TilePos {
     let w = bounds.width.max(1);
     let h = bounds.height.max(1);
     if w == 1 && h == 1 {
         return current;
     }
-    loop {
+    // Rejection sampling. On dense maps this converges in O(1) attempts; on
+    // sparse maps we cap at a generous budget relative to map area so we never
+    // hang a tick loop on an unreachable fully-blocked grid.
+    let max_attempts = (w as u32 * h as u32 * 4).max(64);
+    for _ in 0..max_attempts {
         let x = rng.gen_range(0..w);
         let y = rng.gen_range(0..h);
         let cand = TilePos::new(x, y);
-        if cand != current {
-            return cand;
+        if cand == current {
+            continue;
+        }
+        match grid {
+            Some(g) if !g.is_walkable(cand) => continue,
+            _ => return cand,
         }
     }
+    current
 }
 
 #[cfg(test)]
@@ -262,6 +327,87 @@ mod tests {
             let p = w.citizen_moves[idx].tile_pos();
             assert!(p.x >= 0 && p.x < 6, "x out of bounds: {}", p.x);
             assert!(p.y >= 0 && p.y < 4, "y out of bounds: {}", p.y);
+        }
+    }
+
+    #[test]
+    fn set_walkable_map_stores_grid() {
+        let mut w = World::new();
+        // 3x2 with (1,0) blocked.
+        let cells = vec![true, false, true, true, true, true];
+        w.set_walkable_map(3, 2, cells);
+        let g = w.walk_grid().expect("grid installed");
+        assert_eq!(g.width(), 3);
+        assert_eq!(g.height(), 2);
+        assert!(g.is_walkable(TilePos::new(0, 0)));
+        assert!(!g.is_walkable(TilePos::new(1, 0)));
+        assert!(g.is_walkable(TilePos::new(2, 0)));
+    }
+
+    #[test]
+    fn tick_routes_around_obstacle_when_grid_present() {
+        // (0,0) → (2,0) with (1,0) blocked. With grid present, the citizen must
+        // detour (probably via y=1) and reach (2,0) without ever stepping on
+        // (1,0).
+        let mut w = World::new();
+        let idx = w.spawn_citizen("Pathfinder", TilePos::new(0, 0));
+        let mut cells = vec![true; 9]; // 3x3
+        cells[1] = false; // (1, 0) row-major index = 0*3 + 1
+        w.set_walkable_map(3, 3, cells);
+        w.set_move_target(idx, TilePos::new(2, 0));
+
+        for tick_i in 0..30 {
+            w.tick();
+            let p = w.citizen_moves[idx].tile_pos();
+            assert_ne!(p, TilePos::new(1, 0), "stepped on blocked tile at tick {}", tick_i);
+            if w.citizen_moves[idx].move_target.is_none()
+                && p == TilePos::new(2, 0)
+            {
+                return;
+            }
+        }
+        panic!(
+            "did not reach (2,0) within 30 ticks; final pos={:?}",
+            w.citizen_moves[idx].pos
+        );
+    }
+
+    #[test]
+    fn tick_records_citizen_history_bounded_to_eight() {
+        // Move far enough that the history buffer definitely fills and
+        // overflows. Grid-enabled path is required for history semantics.
+        let mut w = World::new();
+        let idx = w.spawn_citizen("Hist", TilePos::new(0, 0));
+        w.set_walkable_map(20, 20, vec![true; 400]);
+        w.set_move_target(idx, TilePos::new(15, 0));
+        for _ in 0..20 {
+            w.tick();
+        }
+        let hist = &w.citizen_history[idx];
+        assert!(hist.len() <= HISTORY_LEN, "history grew past cap: {}", hist.len());
+        assert_eq!(hist.len(), HISTORY_LEN, "history should be saturated after a long walk");
+    }
+
+    #[test]
+    fn random_walk_only_picks_walkable_targets() {
+        // Narrow walkable corridor: column x=0 walkable, everything else blocked.
+        // Random targets must never land on blocked tiles.
+        let mut w = World::new();
+        let idx = w.spawn_citizen("Corridor", TilePos::new(0, 0));
+        let width: i16 = 4;
+        let height: i16 = 6;
+        let mut cells = vec![false; (width as usize) * (height as usize)];
+        for y in 0..height {
+            cells[(y as usize) * (width as usize)] = true; // x=0 walkable
+        }
+        w.set_walkable_map(width, height, cells);
+        w.enable_random_walk(99, MapBounds { width, height });
+
+        for tick_i in 0..50 {
+            w.tick();
+            if let Some(t) = w.citizen_moves[idx].move_target {
+                assert_eq!(t.x, 0, "random walk picked non-walkable x={} at tick {}", t.x, tick_i);
+            }
         }
     }
 

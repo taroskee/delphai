@@ -65,6 +65,28 @@ impl WorldNode {
         self.world.tick();
     }
 
+    /// Install a walkable grid from a row-major byte buffer: `0` means blocked,
+    /// any non-zero byte means walkable. `cells.len()` must equal
+    /// `width * height` (silently ignored otherwise — Godot side is trusted).
+    #[func]
+    fn set_walkable_map(&mut self, width: i32, height: i32, cells: PackedByteArray) {
+        let w = width.clamp(0, i16::MAX as i32) as i16;
+        let h = height.clamp(0, i16::MAX as i32) as i16;
+        let expected = (w as usize) * (h as usize);
+        if cells.len() != expected {
+            godot_warn!(
+                "set_walkable_map: got {} cells but expected {}x{}={}; ignoring",
+                cells.len(),
+                w,
+                h,
+                expected
+            );
+            return;
+        }
+        let bools: Vec<bool> = (0..cells.len()).map(|i| cells.get(i).unwrap_or(0) != 0).collect();
+        self.world.set_walkable_map(w, h, bools);
+    }
+
     #[func]
     fn get_citizen_count(&self) -> i64 {
         self.world.citizens.len() as i64

@@ -13,6 +13,22 @@ const MAP_WIDTH: int = 24
 const MAP_HEIGHT: int = 14
 const RANDOM_WALK_SEED: int = 0xC0FFEE
 
+# Hand-picked obstacle tiles for Sprint N5 visualization. Kept small so a
+# viewer can easily eyeball detours; WalkGrid is authoritative — these tiles
+# are blocked both for Rust pathfinding AND Godot visuals.
+const OBSTACLE_TILES: Array[Vector2i] = [
+	Vector2i(6, 5),
+	Vector2i(7, 5),
+	Vector2i(8, 5),
+	Vector2i(12, 8),
+	Vector2i(13, 8),
+	Vector2i(14, 8),
+	Vector2i(15, 8),
+	Vector2i(18, 3),
+]
+const OBSTACLE_HEIGHT: float = 1.2
+const GROUND_Y: float = 0.0
+
 # Camera tunables — copied verbatim from Sprint 13.R0 world.gd.
 const CAM_ZOOM_MIN := 10.0
 const CAM_ZOOM_MAX := 200.0
@@ -30,6 +46,7 @@ const CAM_KEY_ACCEL_RAMP := 1.5
 
 @onready var _world_node: Node = $WorldNode
 @onready var _citizens_parent: Node3D = $Citizens
+@onready var _terrain_parent: Node3D = $Terrain
 
 var _tick_accum: float = 0.0
 var _citizen_nodes: Array[Node3D] = []
@@ -40,8 +57,52 @@ var _key_pan_hold: float = 0.0
 
 func _ready() -> void:
 	_world_node.initialize(MAP_WIDTH, MAP_HEIGHT, RANDOM_WALK_SEED)
+	_build_terrain_and_obstacles()
 	_spawn_citizen_visuals()
 	_build_camera()
+
+func _build_terrain_and_obstacles() -> void:
+	# Ground plane covering the whole walkable map.
+	var ground := MeshInstance3D.new()
+	ground.name = "Ground"
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(MAP_WIDTH * TILE_SIZE, MAP_HEIGHT * TILE_SIZE)
+	ground.mesh = plane
+	var ground_mat := StandardMaterial3D.new()
+	ground_mat.albedo_color = Color(0.35, 0.55, 0.30)  # grass
+	plane.material = ground_mat
+	ground.position = Vector3(
+		(MAP_WIDTH * 0.5 - 0.5) * TILE_SIZE,
+		GROUND_Y,
+		(MAP_HEIGHT * 0.5 - 0.5) * TILE_SIZE,
+	)
+	_terrain_parent.add_child(ground)
+
+	# Build walkable-grid byte buffer (1=walkable, 0=blocked). WalkGrid owns
+	# authority; the cube meshes below are just a visual reflection.
+	var cells := PackedByteArray()
+	cells.resize(MAP_WIDTH * MAP_HEIGHT)
+	for i in cells.size():
+		cells[i] = 1
+	var obstacle_mat := StandardMaterial3D.new()
+	obstacle_mat.albedo_color = Color(0.45, 0.35, 0.28)  # rock / wall
+	for tile in OBSTACLE_TILES:
+		if tile.x < 0 or tile.y < 0 or tile.x >= MAP_WIDTH or tile.y >= MAP_HEIGHT:
+			continue
+		cells[tile.y * MAP_WIDTH + tile.x] = 0
+		var cube := MeshInstance3D.new()
+		cube.name = "Obstacle_%d_%d" % [tile.x, tile.y]
+		var box := BoxMesh.new()
+		box.size = Vector3(TILE_SIZE * 0.9, OBSTACLE_HEIGHT, TILE_SIZE * 0.9)
+		box.material = obstacle_mat
+		cube.mesh = box
+		cube.position = Vector3(
+			tile.x * TILE_SIZE,
+			OBSTACLE_HEIGHT * 0.5,
+			tile.y * TILE_SIZE,
+		)
+		_terrain_parent.add_child(cube)
+	_world_node.set_walkable_map(MAP_WIDTH, MAP_HEIGHT, cells)
 
 func _spawn_citizen_visuals() -> void:
 	var count: int = _world_node.get_citizen_count()

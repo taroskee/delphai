@@ -1,4 +1,4 @@
-use crate::pathfinding::TilePos;
+use crate::pathfinding::{TilePos, WalkGrid};
 
 /// Movement speed in tile units per tick. Each step advances the citizen by a
 /// unit vector (toward `move_target`) scaled by `SPEED`, so citizens trace a
@@ -58,6 +58,68 @@ impl MoveState {
         let inv = SPEED / dist;
         self.pos.0 += dx * inv;
         self.pos.1 += dy * inv;
+    }
+
+    /// Obstacle-aware step. Tries the desired unit vector first; if the
+    /// landing tile is non-walkable, tries deviations in ±45° / ±90° / ±135°
+    /// order. `history` gets second priority — if a candidate lands on a
+    /// recently-visited tile, other walkable candidates win, but a historied
+    /// tile is still preferable to getting stuck.
+    ///
+    /// If the target itself is non-walkable, clears the target so the caller
+    /// (e.g. random walk) picks a fresh one. If every direction is blocked,
+    /// `prev_pos` is still updated so interpolation does not snap visually.
+    pub fn step_with_grid(&mut self, grid: &WalkGrid, history: &[TilePos]) {
+        self.prev_pos = self.pos;
+        let Some(target) = self.move_target else { return };
+        let tx = f32::from(target.x);
+        let ty = f32::from(target.y);
+        let dx = tx - self.pos.0;
+        let dy = ty - self.pos.1;
+        let dist = (dx * dx + dy * dy).sqrt();
+
+        if dist <= SPEED {
+            if grid.is_walkable(target) {
+                self.pos = (tx, ty);
+            }
+            // Either way, consume the target. Non-walkable target means the
+            // caller picked an invalid tile; clearing lets them re-pick.
+            self.move_target = None;
+            return;
+        }
+
+        let base_angle = dy.atan2(dx);
+        const DEVIATIONS: [f32; 7] = [
+            0.0,
+            -std::f32::consts::FRAC_PI_4,
+            std::f32::consts::FRAC_PI_4,
+            -std::f32::consts::FRAC_PI_2,
+            std::f32::consts::FRAC_PI_2,
+            -3.0 * std::f32::consts::FRAC_PI_4,
+            3.0 * std::f32::consts::FRAC_PI_4,
+        ];
+
+        let mut fallback: Option<(f32, f32)> = None;
+        for d in DEVIATIONS {
+            let angle = base_angle + d;
+            let ux = angle.cos();
+            let uy = angle.sin();
+            let cand = (self.pos.0 + ux * SPEED, self.pos.1 + uy * SPEED);
+            let cand_tile = TilePos::new(cand.0.round() as i16, cand.1.round() as i16);
+            if !grid.is_walkable(cand_tile) {
+                continue;
+            }
+            if !history.contains(&cand_tile) {
+                self.pos = cand;
+                return;
+            }
+            if fallback.is_none() {
+                fallback = Some(cand);
+            }
+        }
+        if let Some(cand) = fallback {
+            self.pos = cand;
+        }
     }
 
     /// Linear interpolation between `prev_pos` and `pos`. `alpha` is clamped
@@ -216,6 +278,88 @@ mod tests {
         };
         assert!(close2(m.world_pos(-1.0), (0.0, 0.0)));
         assert!(close2(m.world_pos(2.0), (1.0, 0.0)));
+    }
+
+    #[test]
+    fn step_with_grid_all_walkable_matches_plain_step() {
+        let mut a = MoveState::new(TilePos::new(0, 0));
+        a.move_target = Some(TilePos::new(3, 4));
+        let mut b = a;
+        let grid = WalkGrid::new_all_walkable(10, 10);
+        for _ in 0..4 {
+            a.step();
+            b.step_with_grid(&grid, &[]);
+            assert!(close2(a.pos, b.pos), "a={:?} b={:?}", a.pos, b.pos);
+            assert_eq!(a.move_target, b.move_target);
+        }
+    }
+
+    #[test]
+    fn step_with_grid_detours_around_direct_obstacle() {
+        // (0,0) → (2,0) with (1,0) blocked. The citizen must never occupy
+        // (1, 0) but should still reach (2, 0) eventually.
+        let mut m = MoveState::new(TilePos::new(0, 0));
+        m.move_target = Some(TilePos::new(2, 0));
+        let mut grid = WalkGrid::new_all_walkable(3, 3);
+        grid.set(TilePos::new(1, 0), false);
+        for tick_i in 0..20 {
+            m.step_with_grid(&grid, &[]);
+            assert_ne!(
+                m.tile_pos(),
+                TilePos::new(1, 0),
+                "stepped on blocked tile at tick {}",
+                tick_i
+            );
+            if m.move_target.is_none() {
+                break;
+            }
+        }
+        assert_eq!(m.tile_pos(), TilePos::new(2, 0), "did not reach target");
+    }
+
+    #[test]
+    fn step_with_grid_clears_target_when_target_is_non_walkable() {
+        // If the target itself is blocked, step can never snap. Clearing the
+        // target on arrival-proximity signals "try a new one" to the caller.
+        let mut m = MoveState::new(TilePos::new(0, 0));
+        m.move_target = Some(TilePos::new(1, 0));
+        let mut grid = WalkGrid::new_all_walkable(3, 3);
+        grid.set(TilePos::new(1, 0), false);
+        m.step_with_grid(&grid, &[]);
+        assert_eq!(m.move_target, None);
+        // Did not enter the blocked tile.
+        assert_ne!(m.tile_pos(), TilePos::new(1, 0));
+    }
+
+    #[test]
+    fn step_with_grid_stays_put_when_all_directions_blocked() {
+        // 1x1 pocket at (1,1), target (5,5) beyond walls.
+        let mut m = MoveState::new(TilePos::new(1, 1));
+        m.move_target = Some(TilePos::new(5, 5));
+        let mut grid = WalkGrid::from_row_major(3, 3, vec![false; 9]);
+        grid.set(TilePos::new(1, 1), true); // only the pocket is walkable
+        let before = m.pos;
+        m.step_with_grid(&grid, &[]);
+        // No candidate walkable → pos unchanged, prev_pos updated to before.
+        assert!(close2(m.pos, before));
+        assert!(close2(m.prev_pos, before));
+    }
+
+    #[test]
+    fn step_with_grid_history_prefers_unvisited_tile() {
+        // With two walkable detour candidates, history should push the
+        // algorithm toward the non-visited one.
+        // Setup: at (1,1) targeting (1,3). (1,2) blocked. Both (0,2) and (2,2)
+        // are valid detours; history contains (2,2), so (0,2) should win.
+        let mut m = MoveState::new(TilePos::new(1, 1));
+        m.move_target = Some(TilePos::new(1, 3));
+        let mut grid = WalkGrid::new_all_walkable(3, 4);
+        grid.set(TilePos::new(1, 2), false);
+        let history = [TilePos::new(2, 2)];
+        m.step_with_grid(&grid, &history);
+        // Picked (0,2) or equivalent non-history walkable, NOT (2,2).
+        assert_ne!(m.tile_pos(), TilePos::new(2, 2));
+        assert_ne!(m.tile_pos(), TilePos::new(1, 2));
     }
 
     #[test]
